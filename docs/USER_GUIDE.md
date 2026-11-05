@@ -26,8 +26,11 @@ apply to a complete bundle.
   temporary files. This is not the storage budget for compiling the project.
 
 The current launcher verifies the account on each Play action. It has no
-supported offline-launch mode. The native UI currently uses Store market `CA`;
-developers can select a different two-letter market through the CLI.
+supported offline-launch mode. Choose **Bedrock for Mac → Settings…** to set
+your Microsoft Store country using a two-letter code, such as `CA`, `US`, `GB`
+or `TR`, then choose **Save**. The default is `CA`. The saved country applies
+to your next Play or game update; wait for setup or Minecraft to finish before
+changing it. The CLI also accepts `--market`.
 
 ## Install, sign in, and play
 

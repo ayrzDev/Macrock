@@ -54,7 +54,25 @@ text+='''
     NSApp.setActivationPolicy(.prohibited)
     let window = FixtureWindow(contentRect:NSRect(x:-2000,y:-2000,width:300,height:200),styleMask:[.titled,.closable],backing:.buffered,defer:false)
     window.isReleasedWhenClosed = false
-    let launcher = Launcher()
+    let preferencesName = "bedrock-launcher-fixture-" + UUID().uuidString
+    let preferences = UserDefaults(suiteName: preferencesName)!
+    defer { preferences.removePersistentDomain(forName: preferencesName) }
+    let launcher = Launcher(preferences: preferences)
+    precondition(launcher.market == "CA")
+    launcher.setMarket("TR")
+    precondition(launcher.market == "TR")
+    precondition(Launcher(preferences: preferences).market == "TR")
+    for invalid in ["", "T", "TUR", "tr", "T1", "ＴＲ", "../TR"] {
+        launcher.setMarket(invalid)
+        precondition(launcher.market == "TR")
+    }
+    launcher.running = true
+    launcher.setMarket("US")
+    precondition(launcher.market == "TR")
+    launcher.running = false
+    preferences.set("invalid", forKey: "storeMarket")
+    precondition(Launcher(preferences: preferences).market == "CA")
+    launcher.setMarket("TR")
     let delegate = AppDelegate()
     delegate.launcher = launcher
     delegate.attachWindow(window)
@@ -162,7 +180,18 @@ raise SystemExit(1 if state=='error' else 0)
         let operations=try JSONDecoder().decode([String].self,from:Data(contentsOf:attempts))
         precondition(operations == ["sign-out", "sign-out", "play"])
     }
-    print("PASS: last-close keeps application; 100 no-window reopen/quit requests create one scene request; 100 repeated quits; real worker playing-to-exit; automatic dismissal; Keep Open and new prompt; stale completion isolation; real setup cancellation; checking/cancelling quit guards; failed sign-out retries sign-out and successful ready/new returns to Play")
+    // Read the real controller's arguments in a dummy worker; never contact Microsoft.
+    let marketArguments = launcher.root.appendingPathComponent("market-arguments")
+    try """
+import json,pathlib,sys
+pathlib.Path('market-arguments').write_text(json.dumps(sys.argv[1:]))
+print(json.dumps(dict(state='ready',title='ready',detail='',progress=None)),flush=True)
+""".write(to:worker,atomically:true,encoding:.utf8)
+    launcher.start(updateGame:true)
+    try pump { !launcher.running }
+    let arguments = try JSONDecoder().decode([String].self,from:Data(contentsOf:marketArguments))
+    precondition(arguments == ["--market", "TR", "--update-game"])
+    print("PASS: market persistence, validation, active-session guard and worker arguments; last-close keeps application; 100 no-window reopen/quit requests create one scene request; 100 repeated quits; real worker playing-to-exit; automatic dismissal; Keep Open and new prompt; stale completion isolation; real setup cancellation; checking/cancelling quit guards; failed sign-out retries sign-out and successful ready/new returns to Play")
  }
 }
 '''
@@ -194,7 +223,7 @@ with tempfile.TemporaryDirectory(prefix='bedrock-quit-fixture-') as data:
   sys.stderr.write(p.stdout+p.stderr)
   raise SystemExit(p.returncode)
  print(p.stdout)
-(base/'result.json').write_text(json.dumps({'source_sha256':source_sha256,'source_unchanged_during_run':hashlib.sha256(src.read_bytes()).hexdigest()==source_sha256,'status':'pass','scope':'Production Launcher/AppDelegate with dummy local worker, automatic startup disabled and sheet display intercepted; no real game/account/foreground UI','cases':['100 repeated Cmd-Q calls create one sheet','real dummy worker playing-to-ready exit drains main-queue completion','sheet auto-dismisses when state changes or worker ends','Keep Open permits one fresh later prompt','stale completion cannot act on a fresh prompt','Stop Setup cancels real dummy process','checking/cancelling repeated quit guards','failed sign-out retries sign-out; successful ready/new resets to Play'],'limit':'Native sheet display needs separate interactive validation'},indent=2)+'\n')
+(base/'result.json').write_text(json.dumps({'source_sha256':source_sha256,'source_unchanged_during_run':hashlib.sha256(src.read_bytes()).hexdigest()==source_sha256,'status':'pass','scope':'Production Launcher/AppDelegate with dummy local worker, automatic startup disabled and sheet display intercepted; no real game/account/foreground UI','cases':['Store market persists in an isolated preference suite; invalid settings and active-operation changes are rejected; selected market reaches update worker arguments','100 repeated Cmd-Q calls create one sheet','real dummy worker playing-to-ready exit drains main-queue completion','sheet auto-dismisses when state changes or worker ends','Keep Open permits one fresh later prompt','stale completion cannot act on a fresh prompt','Stop Setup cancels real dummy process','checking/cancelling repeated quit guards','failed sign-out retries sign-out; successful ready/new resets to Play'],'limit':'Native sheet display needs separate interactive validation'},indent=2)+'\n')
 
 if args.output: print('Evidence: '+str(base/'result.json'))
 if workspace: workspace.cleanup()

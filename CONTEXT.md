@@ -45,6 +45,12 @@ The worker emits newline-delimited JSON with `state`, `title`, `detail` and null
 `progress`. Only known progress lines and safe `BEDROCK_ERROR` codes reach the UI.
 Arbitrary account/service output must not become interface text.
 
+The native Settings window stores a two-letter Store country code in the
+launcher's preferences (default `CA`). Each operation passes that selection via
+`--market` to the worker, acquisition/account helper and game-launch command.
+Changes are blocked during an active operation; retries use the current saved
+selection without starting an additional account session.
+
 **Update Minecraft…** downloads separately, preserves the previous game and
 prefix, and journals activation. A pending journal blocks ordinary launch until
 recovery. Recovery retains displaced newer data under `game-backups`. Live

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local launcher worker. Only structured, credential-free status reaches the UI."""
 import fcntl
+import argparse
 import importlib.util
 import json
 import os
@@ -364,7 +365,7 @@ def initialize_session_bundle():
 
 
 @contextlib.contextmanager
-def update_account(runtime, destination):
+def update_account(runtime, destination, market='CA'):
     # The helper arms its own parent-lifetime guardian before sign-in. It waits
     # for account() to publish its session record before creating any socket,
     # closing the worker-death race between Popen and the record write.
@@ -373,7 +374,7 @@ def update_account(runtime, destination):
     previous = {key: os.environ.get(key) for key in changes}
     os.environ.update(changes)
     try:
-        with runtime.account(destination, download=True,
+        with runtime.account(destination, market=market, download=True,
                              progress=lambda line: account_update(line, updating=True)):
             yield
     finally:
@@ -384,7 +385,7 @@ def update_account(runtime, destination):
                 os.environ[key] = value
 
 
-def update_minecraft(runtime, log):
+def update_minecraft(runtime, log, market='CA'):
     transaction, game, prefix = update_paths()
     # Both profiles reject a different game hash even with their gate disabled.
     # Keep the playable installation intact until the source developer restores
@@ -412,7 +413,7 @@ def update_minecraft(runtime, log):
             shutil.rmtree(initial)
     try:
         event('busy', 'Updating Minecraft', 'Downloading the latest version available to your Microsoft account.', 0.2)
-        with update_account(runtime, transaction / 'download'):
+        with update_account(runtime, transaction / 'download', market):
             run([sys.executable, script_path('standalone-setup.py'), '--threading'], log,
                 'Could not download the Microsoft game component. Check your connection and retry.')
             runtime.prerequisites(transaction / 'download')
@@ -449,8 +450,18 @@ def update_minecraft(runtime, log):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument('--status', action='store_true')
+    operation.add_argument('--sign-out', action='store_true')
+    operation.add_argument('--update-game', action='store_true')
+    parser.add_argument('--market', default='CA', help='Two-letter uppercase Store country code')
+    args = parser.parse_args()
+    if (len(args.market) != 2 or not args.market.isascii()
+            or not args.market.isupper() or not args.market.isalpha()):
+        parser.error('--market must be a two-letter uppercase country code')
     os.umask(0o077)
-    if '--status' in sys.argv:
+    if args.status:
         if os.path.lexists(ROOT / '.minecraft-update'):
             event('update', 'Finish Minecraft update', 'Choose Continue to recover the interrupted update.')
             return
@@ -469,23 +480,23 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RuntimeError('Setup or Minecraft is already running. Return to the other launcher window.')
-        if '--update-game' in sys.argv or os.path.lexists(ROOT / '.minecraft-update'):
+        if args.update_game or os.path.lexists(ROOT / '.minecraft-update'):
             runtime = load('standalone_maintenance', 'standalone.py')
             with maintenance_lock(runtime):
                 recover_update()
                 initialize_bundle()
                 validate_install()
                 with (folder / 'onboarding.log').open('ab') as log:
-                    if '--update-game' in sys.argv:
+                    if args.update_game:
                         try:
-                            update_minecraft(runtime, log)
+                            update_minecraft(runtime, log, args.market)
                         except runtime.AccountError as error:
                             raise RuntimeError(ACCOUNT_ERRORS.get(error.code, str(error))) from error
                         return
         initialize_session_bundle()
         with (folder / 'onboarding.log').open('ab') as log:
             ready = installed()
-            if '--sign-out' in sys.argv:
+            if args.sign_out:
                 helper = ROOT / 'sources/xodus/target/release/examples/standalone_helper'
                 event('busy', 'Signing out')
                 run([helper.resolve(), '--sign-out', ROOT / 'game'], log,
@@ -501,11 +512,11 @@ def main():
             try:
                 # One owner keeps the same helper alive through download,
                 # prefix setup and gameplay. The child launcher reuses it.
-                with runtime.account(ROOT / 'game', download=not (ROOT / 'game').exists(), progress=account_update):
+                with runtime.account(ROOT / 'game', args.market, download=not (ROOT / 'game').exists(), progress=account_update):
                     if not ready:
                         install(log)
                     event('playing', 'Minecraft is running', 'You can close this window. Quit Minecraft to end your session.')
-                    run([sys.executable, script_path('standalone.py'), 'launch'], log,
+                    run([sys.executable, script_path('standalone.py'), '--market', args.market, 'launch'], log,
                         'Minecraft stopped unexpectedly. Open the setup log for details, then try again.')
             except runtime.AccountError as error:
                 raise RuntimeError(ACCOUNT_ERRORS.get(error.code, str(error))) from error

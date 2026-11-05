@@ -1,6 +1,6 @@
 # Compatibility
 
-Updated October 25, 2026; local RC4 artifact evidence dates to October 7. **Historical observations and source behavior are not
+Updated November 5, 2026; local RC4 artifact evidence dates to October 7. **Historical observations and source behavior are not
 release-candidate certification.** Local **0.3.0 RC4, build 6** has an inspected macOS 15.0 floor; gameplay
 qualification remains pending. See [release readiness](RELEASE.md).
 
@@ -25,7 +25,7 @@ qualification remains pending. See [release readiness](RELEASE.md).
 | Marketplace / controllers | No complete qualification record | Untested; no blanket support claim |
 | Custom skin import | October 19 local native checks passed dialog/cancellation and PNG import/rendering, including a Unicode filename | Picker crash no longer reproduces locally; #4 awaits reporter verification. 26.52 restart reset matches an [upstream bug](history/TESTING.md#october-20-skin-persistence-diagnosis); newer-game validation and world import/export regression pending |
 | Offline launch | Account verified on Play | Unsupported |
-| Store market | Native UI uses CA; CLI accepts a market argument | Other native-UI markets unverified |
+| Store market | Native Settings saves a two-letter country code (default CA); Play and updates pass it to the helper | Offline propagation fixtures exist; real-account behavior in other markets remains unverified |
 | Cancel while waiting for Keychain | Actual RC3 native Cancel stopped helper; no socket/prefix/game; imported payload key hashes unchanged | Passed only this stage; retry/authentication/gameplay remain untested |
 | App/game updates | Manual app replacement; **Update Minecraft…** downloads a new game and retains backups | Candidate live upgrade and recovery test pending |
 | Signing / Gatekeeper | Local ad-hoc builds; no public notarized app | Developer ID/notarization is an external blocker |

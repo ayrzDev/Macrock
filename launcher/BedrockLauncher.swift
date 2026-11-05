@@ -14,14 +14,19 @@ struct Status: Decodable {
 final class Launcher: ObservableObject {
     @Published var status = Status(state: "checking", title: "Minecraft on your Mac", detail: "Checking installation…", progress: nil)
     @Published var running = false
+    @Published private(set) var market = "CA"
     private var process: Process?
     private var buffer = Data()
     private var cancellationRequested = false
     private enum Operation { case play, signOut, updateGame }
     private var retryOperation = Operation.play
+    private let preferences: UserDefaults
     let root: URL
 
-    init() {
+    init(preferences: UserDefaults = .standard) {
+        self.preferences = preferences
+        let savedMarket = preferences.string(forKey: "storeMarket") ?? "CA"
+        _market = Published(initialValue: Self.validMarket(savedMarket) ? savedMarket : "CA")
         let path = Bundle.main.object(forInfoDictionaryKey: "BedrockProjectPath") as? String ?? ""
         root = path.isEmpty ? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Bedrock for Mac") : URL(fileURLWithPath: path)
         start(check: true)
@@ -39,7 +44,7 @@ final class Launcher: ObservableObject {
         let worker = resources.appendingPathComponent("worker/BedrockWorker")
         let packaged = FileManager.default.isExecutableFile(atPath: worker.path)
         task.executableURL = packaged ? worker : URL(fileURLWithPath: "/usr/bin/python3")
-        task.arguments = (packaged ? [] : [root.appendingPathComponent("launcher/setup.py").path]) + (check ? ["--status"] : signOut ? ["--sign-out"] : updateGame ? ["--update-game"] : [])
+        task.arguments = (packaged ? [] : [root.appendingPathComponent("launcher/setup.py").path]) + ["--market", market] + (check ? ["--status"] : signOut ? ["--sign-out"] : updateGame ? ["--update-game"] : [])
         task.currentDirectoryURL = packaged ? resources : root
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
@@ -107,6 +112,16 @@ final class Launcher: ObservableObject {
     }
 
     var canCancel: Bool { running && !cancellationRequested && status.state == "busy" }
+
+    static func validMarket(_ value: String) -> Bool {
+        value.utf8.count == 2 && value.utf8.allSatisfy { (65...90).contains($0) }
+    }
+
+    func setMarket(_ value: String) {
+        guard !running, Self.validMarket(value) else { return }
+        preferences.set(value, forKey: "storeMarket")
+        market = value
+    }
 
     func cancel() {
         guard canCancel else { return }
@@ -260,6 +275,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+struct StoreSettingsView: View {
+    @ObservedObject var launcher: Launcher
+    @State private var country = ""
+    private var normalized: String { country.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+
+    var body: some View {
+        Form {
+            TextField("Store country code", text: $country)
+                .disabled(launcher.running)
+            Text("Use your Microsoft Store country, for example CA, US, GB, or TR. This applies to your next sign-in and game update.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !Launcher.validMarket(normalized) {
+                Text("Enter a two-letter country code.").font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if launcher.running {
+                Text("Wait for setup or Minecraft to finish before changing the country.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button(country == launcher.market ? "Saved" : "Save") {
+                launcher.setMarket(normalized)
+                country = launcher.market
+            }
+            .disabled(launcher.running || !Launcher.validMarket(normalized) || normalized == launcher.market)
+            .keyboardShortcut(.defaultAction)
+        }
+        .padding(24).frame(width: 380)
+        .onAppear { country = launcher.market }
+    }
+}
+
 struct LauncherView: View {
     @ObservedObject var launcher: Launcher
     private var fresh: Bool { launcher.status.state == "new" }
@@ -339,6 +387,9 @@ struct BedrockLauncherApp: App {
                 }
                 Button("Open Setup Logs") { launcher.showLog() }
             }
+        }
+        Settings {
+            StoreSettingsView(launcher: launcher)
         }
     }
 }

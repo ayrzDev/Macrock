@@ -1,6 +1,6 @@
 # Release readiness
 
-Updated November 2, 2026. **The public project is a source preview.** There is
+Updated November 5, 2026. **The public project is a source preview.** There is
 no public notarized app/installer. Source PRs do not publish or qualify binaries.
 The intended player experience is open the app, complete required setup/sign-in,
 and reach vanilla Minecraft.
@@ -92,5 +92,84 @@ Keychain to imitate a fresh installation.
 Before advertising an app download, link its exact artifact, checksums,
 corresponding-source/notices materials and separate source, clean-machine,
 account, graphics, save/restore, update, multiplayer and soak results.
+
+## November 5 local follow-up (unreleased source)
+
+Reviewed base: `098f262a018bf925779f95ad01ed910d0e6b2fc5`, initially clean;
+changes are retained in the working diff on `launcher-market-and-recovery-checks`.
+Host: macOS 27.0 (26A428), Python 3.14.7. No app/runtime was installed or
+replaced, and no game, Keychain or real account session was opened.
+
+Native Settings now saves a Store country code and passes it through Play,
+initial acquisition and game updates. The default remains `CA`. Offline worker
+fixtures check the selected market and one-helper lifetime. Added recovery
+fixtures cover disk exhaustion during the prefix snapshot and failure to publish
+the final backup after commit; both preserve the original world and recovery
+copies. These fixtures do not qualify a real game update or restore.
+
+Validation commands and outcomes:
+
+- `python3 -B -m unittest discover -s tests -p 'test_onboarding.py'`:
+  **49 passed** with local socket permission. An earlier restricted run of the
+  48-test version failed three socket fixtures and one dependent killed-worker
+  fixture because socket binding was denied; the same 48 tests then passed
+  with permission, followed by the final 49-test pass.
+- Python AST parsing of `launcher/setup.py`, `tests/test_onboarding.py` and
+  `tests/check-launcher-lifecycle.py`: passed.
+- `python3 -B -m unittest discover -s tests -p 'test_packaging.py'`:
+  **19 passed**, including bundled script and source-snapshot fixtures.
+- `python3 -B -m unittest discover -s tests -p 'test_export_source.py'`:
+  **14 passed**. Together with onboarding and packaging, **82 targeted tests
+  passed**; this is not a full-suite result.
+- `/usr/bin/xcrun --sdk macosx --toolchain default swiftc -frontend -parse launcher/BedrockLauncher.swift`:
+  passed the syntax-only check. This does not establish type checking,
+  compilation or native UI behavior.
+- `python3 tools/export-source.py --check`: **282 allowlisted source files**.
+  Source inventory verification and `git diff --check` passed after refresh.
+- `python3 tools/qa_resource_guard.py --log /tmp/bedrock-review-tests-20261105.log -- python3 -m unittest discover -s tests -p 'test_*.py'`:
+  the guard refused execution at macOS memory pressure level 2. Full-suite
+  qualification remains pending; the guard was not weakened.
+- `python3 tools/qa_resource_guard.py --log /tmp/bedrock-market-lifecycle-20261105.log -- python3 tests/check-launcher-lifecycle.py --output build/market-lifecycle-20261105`:
+  also refused at memory pressure level 2. The extended Swift fixture covers
+  isolated preference persistence, invalid codes, active-operation guards and
+  worker arguments, but is not yet compiled or run on this revision. Native
+  Settings display/keyboard checks also remain pending.
+
+The tester has no independent test Mac or macOS user account and no updated
+HTTP-400 diagnostic. Clean-machine setup, live update/restore, skin/world
+import/export, multiplayer and soak gates remain open. The Xbox HTTP-400 cause
+remains unknown. Developer ID/notarization and downloaded-app acceptance remain
+external distribution work; this source change does not close those gates.
+
+### Same-Mac follow-up after memory pressure cleared
+
+On the same base and host, 248 selected isolated Python tests passed without
+invoking a compiler while memory pressure was elevated. After the tester closed
+unused applications, the resource guard allowed the full suite and Swift checks.
+No system settings, installed app, game, worlds, or credentials were changed.
+
+- `python3 tools/qa_resource_guard.py --log /tmp/bedrock-safe-full-tests-20261105.log -- python3 -B -m unittest discover -s tests -p 'test_*.py'`:
+  **395 passed**, before the subsequent Swift-only text wrapping fix.
+- `python3 tools/qa_resource_guard.py --log /tmp/bedrock-safe-lifecycle-final-20261105.log -- python3 tests/check-launcher-lifecycle.py --output build/safe-lifecycle-final-20261105`:
+  passed against Swift source SHA-256
+  `749516addb3859dc288a0033b8a196527d476e77ae4e84ff464415012f06412c`,
+  using Apple Swift 6.4.2. This supersedes the earlier blocked lifecycle run.
+- In `build/bedrock-ui-qa-41xxbjl2`, the copied `tools/build-launcher.sh` was
+  run under the guard with `--output 'build/Bedrock QA Fixed.app'` and
+  `--work-dir build` paths resolved inside that fixture directory. It built the
+  exact final Swift source, with a synthetic `launcher/setup.py`, distinct app
+  identity and no bundled game runtime. `codesign --verify --deep --strict`
+  passed for the local fixture. Executable SHA-256:
+  `c03304d6c1cf679605a7cf0ceca7dd0b2c50b8fb104530960f786dc24db17148`.
+- Visible Settings initially truncated its explanation. The final fixture
+  displayed all lines, showed the default `CA`, and saved ` gb ` as `GB` via
+  Return. The preceding fixture rejected `T1` with Save disabled. Both test apps
+  were quit normally. The lifecycle fixture separately verified persistence,
+  disabled edits while active, and the update worker's selected country.
+
+This is native launcher and offline source evidence on one Mac. It does not
+close independent clean-machine, live account, gameplay, update/restore,
+multiplayer, or distribution gates.
+
 [Draft release notes](RELEASE_NOTES.md), [licensing](../THIRD_PARTY.md) and
 [publishing](PUBLISHING.md) describe the remaining distribution work.

@@ -26,6 +26,103 @@ runtime_spec.loader.exec_module(runtime)
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_invalid_market_is_rejected_before_data_or_account_access(self):
+        for market in ('', 'T', 'TUR', 'tr', 'T1', 'ＴＲ', '../TR'):
+            with self.subTest(market=market), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with patch.object(worker, 'ROOT', root), patch.object(worker, 'load') as load, \
+                        patch('sys.argv', ['setup.py', '--market', market]), \
+                        contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as error:
+                        worker.main()
+                self.assertEqual(error.exception.code, 2)
+                load.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_selected_market_reaches_returning_account_and_game_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'game').mkdir()
+            (root / 'game/Minecraft.Windows.exe').write_bytes(b'MZfixture')
+            account = unittest.mock.Mock(return_value=contextlib.nullcontext())
+            session = SimpleNamespace(account=account, AccountError=runtime.AccountError)
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'BUNDLE', None), \
+                    patch.object(worker, 'load', return_value=session), \
+                    patch.object(worker, 'installed', return_value=True), \
+                    patch.object(worker, 'validate_install'), patch.object(worker, 'run') as run, \
+                    patch('sys.argv', ['setup.py', '--market', 'TR']), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                worker.main()
+            self.assertEqual(account.call_count, 1)
+            self.assertEqual(account.call_args.args, (root / 'game', 'TR'))
+            self.assertFalse(account.call_args.kwargs['download'])
+            self.assertEqual(run.call_args.args[0][-3:], ['--market', 'TR', 'launch'])
+
+    def test_selected_market_reaches_update_without_a_second_account(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session, sessions, _ = self.update_fixture(root)
+            original = session.account
+            markets = []
+
+            @contextlib.contextmanager
+            def account(destination, **kwargs):
+                markets.append(kwargs['market'])
+                with original(destination, **kwargs):
+                    yield
+
+            session.account = account
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'run'), \
+                    patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=100 * 1024**3)), \
+                    tempfile.TemporaryFile() as log, contextlib.redirect_stdout(io.StringIO()):
+                worker.update_minecraft(session, log, 'TR')
+            self.assertEqual(markets, ['TR'])
+            self.assertEqual(sessions, ['start', 'stop'])
+
+    def test_update_recovers_after_backup_publication_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session, sessions, prefix = self.update_fixture(root)
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'run'), \
+                    patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=100 * 1024**3)), \
+                    tempfile.TemporaryFile() as log, contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(worker, 'finish_update', side_effect=OSError('fixture backup unavailable')):
+                    with self.assertRaisesRegex(OSError, 'backup unavailable'):
+                        worker.update_minecraft(session, log)
+                record = json.loads((root / '.minecraft-update/transaction.json').read_text())
+                self.assertEqual(record['phase'], 'committed')
+                backup = worker.recover_update()
+                worker.recover_update()
+            self.assertEqual(sessions, ['start', 'stop'])
+            self.assertEqual((root / 'game/Minecraft.Windows.exe').read_bytes(), b'MZnew')
+            self.assertEqual((prefix / 'world').read_bytes(), b'original world')
+            self.assertEqual((backup / 'previous-game/Minecraft.Windows.exe').read_bytes(), b'MZold')
+            self.assertEqual((backup / 'previous-prefix/world').read_bytes(), b'original world')
+            self.assertFalse((root / '.minecraft-update').exists())
+
+    def test_failed_snapshot_keeps_worlds_and_partial_backup_for_recovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session, sessions, prefix = self.update_fixture(root)
+
+            def full_disk(_source, destination, **_kwargs):
+                destination.mkdir()
+                (destination / 'world').write_bytes(b'partial snapshot')
+                raise OSError(28, 'fixture disk full')
+
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'run'), \
+                    patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=100 * 1024**3)), \
+                    patch.object(worker.shutil, 'copytree', side_effect=full_disk), \
+                    tempfile.TemporaryFile() as log, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'previous setup was restored'):
+                    worker.update_minecraft(session, log)
+            self.assertEqual(sessions, ['start', 'stop'])
+            self.assertEqual((root / 'game/Minecraft.Windows.exe').read_bytes(), b'MZold')
+            self.assertEqual((prefix / 'world').read_bytes(), b'original world')
+            backup, = (root / 'game-backups').iterdir()
+            self.assertEqual((backup / 'previous-prefix/world').read_bytes(), b'partial snapshot')
+            self.assertFalse((root / '.minecraft-update').exists())
+
     def test_worker_selects_relocated_source_or_flat_bundle_commands(self):
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temporary, patch.object(worker, 'ROOT', Path(temporary)):
@@ -649,10 +746,13 @@ class OnboardingTests(unittest.TestCase):
     def test_install_and_launch_share_one_account_process(self):
         self.run_account_flow()
 
+    def test_first_download_and_launch_share_selected_market_and_account(self):
+        self.run_account_flow(market='TR')
+
     def test_preparation_failure_stops_the_shared_helper_and_never_launches(self):
         self.run_account_flow(fail_prepare=True)
 
-    def run_account_flow(self, fail_prepare=False):
+    def run_account_flow(self, fail_prepare=False, market='CA'):
         # Exercise the real worker orchestration and runtime account context.
         # The fake child provides a real private socket and counts each launch.
         with tempfile.TemporaryDirectory() as folder:
@@ -702,7 +802,7 @@ class OnboardingTests(unittest.TestCase):
                     patch.object(worker.platform, 'machine', return_value='arm64'), \
                     patch.object(worker.platform, 'mac_ver', return_value=('26.0', (), '')), \
                     patch.object(worker.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
-                    patch('sys.argv', ['setup.py']), contextlib.redirect_stdout(io.StringIO()):
+                    patch('sys.argv', ['setup.py', '--market', market]), contextlib.redirect_stdout(io.StringIO()):
                 for relative in ('runtime/standalone/wine/build-manifest.json',
                                  'runtime/standalone/dxmt/manifest.json',
                                  'sources/xodus/target/release/examples/standalone_helper'):
@@ -717,6 +817,7 @@ class OnboardingTests(unittest.TestCase):
             self.assertEqual(len(started), 1, 'Setup must not start a second Keychain-reading helper for play')
             self.assertIn('--download', started[0])
             self.assertIn('--serve-after', started[0])
+            self.assertEqual(started[0][started[0].index('--market') + 1], market)
             self.assertEqual(commands, ['--threading', 'prepare'] + ([] if fail_prepare else ['launch']))
             self.assertFalse(endpoint.exists())
             self.assertFalse(state.exists())
