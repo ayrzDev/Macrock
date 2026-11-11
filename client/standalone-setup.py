@@ -41,7 +41,7 @@ GAMING_UNPACKED_SIZE = 198332601
 GAMING_SHA256 = 'f8d5f3ebe7339d9d65ebf4b4d68cb7a5281c0f944acafd613ccc68d7d908baed'
 THREADING_SHA256 = "aa611155057ebd01cf315ad702a4b5725aa9d5e6fad87732c956fe0a1e5fcfba"
 THREADING = ROOT / "runtime/xgameruntime.dll.threading"
-PATCHES = ("xodus-real-store-license.patch", "keychain-cache.patch", "unified-helper.patch", "standalone-signin-window.patch", "standalone-keychain-write.patch", "standalone-account-transport.patch", "standalone-helper-dependencies.patch", "xbox-auth-errors.patch", "standalone-package-ticket.patch", "standalone-xvd-preparation-length.patch")
+PATCHES = ("xodus-real-store-license.patch", "keychain-cache.patch", "unified-helper.patch", "standalone-signin-window.patch", "standalone-keychain-write.patch", "standalone-account-transport.patch", "standalone-helper-dependencies.patch", "xbox-auth-errors.patch", "standalone-package-ticket.patch", "standalone-xvd-preparation-length.patch", "standalone-offline-license-diagnostic.patch", "standalone-account-switch.patch", "standalone-license-ticket.patch")
 
 
 def sha256(path):

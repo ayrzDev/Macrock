@@ -8,6 +8,8 @@ struct Status: Decodable {
     let title: String
     let detail: String
     let progress: Double?
+    var gameVersion: String?
+    var account: String?
 }
 
 @MainActor
@@ -15,10 +17,12 @@ final class Launcher: ObservableObject {
     @Published var status = Status(state: "checking", title: "Minecraft on your Mac", detail: "Checking installation…", progress: nil)
     @Published var running = false
     @Published private(set) var market = "CA"
+    @Published private(set) var gameVersion: String?
+    @Published private(set) var accountStatus = "Microsoft account"
     private var process: Process?
     private var buffer = Data()
     private var cancellationRequested = false
-    private enum Operation { case play, signOut, updateGame }
+    private enum Operation { case play, signIn, signOut, updateGame }
     private var retryOperation = Operation.play
     private let preferences: UserDefaults
     let root: URL
@@ -32,19 +36,20 @@ final class Launcher: ObservableObject {
         start(check: true)
     }
 
-    func start(check: Bool = false, signOut: Bool = false, updateGame: Bool = false) {
+    func start(check: Bool = false, signOut: Bool = false, updateGame: Bool = false, signIn: Bool = false) {
         guard !running else { return }
         running = true
         buffer = Data()
         cancellationRequested = false
-        if !check { retryOperation = signOut ? .signOut : updateGame ? .updateGame : .play }
+        if !check { retryOperation = signOut ? .signOut : signIn ? .signIn : updateGame ? .updateGame : .play }
         let task = Process()
         let pipe = Pipe()
         let resources = Bundle.main.resourceURL!
         let worker = resources.appendingPathComponent("worker/BedrockWorker")
         let packaged = FileManager.default.isExecutableFile(atPath: worker.path)
         task.executableURL = packaged ? worker : URL(fileURLWithPath: "/usr/bin/python3")
-        task.arguments = (packaged ? [] : [root.appendingPathComponent("launcher/setup.py").path]) + ["--market", market] + (check ? ["--status"] : signOut ? ["--sign-out"] : updateGame ? ["--update-game"] : [])
+        let operation = check ? ["--status"] : signOut ? ["--sign-out"] : signIn ? ["--sign-in"] : updateGame ? ["--update-game"] : []
+        task.arguments = (packaged ? [] : [root.appendingPathComponent("launcher/setup.py").path]) + ["--market", market] + operation
         task.currentDirectoryURL = packaged ? resources : root
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
@@ -75,7 +80,7 @@ final class Launcher: ObservableObject {
                     if !self.buffer.isEmpty { self.receive(Data([10])) }
                     self.running = false
                     self.process = nil
-                    if task.terminationStatus == 0 && ["ready", "new"].contains(self.status.state) {
+                    if task.terminationStatus == 0 && ["ready", "new", "update"].contains(self.status.state) {
                         self.retryOperation = .play
                     }
                     if self.cancellationRequested && self.status.state == "cancelling"
@@ -86,6 +91,10 @@ final class Launcher: ObservableObject {
                         self.status = Status(state: "error", title: "Couldn’t finish setup", detail: "Try again. If it happens again, open the setup log.", progress: nil)
                     } else if ["busy", "checking", "playing", "cancelling"].contains(self.status.state) {
                         self.status = Status(state: "error", title: "Setup stopped", detail: "Try again to continue.", progress: nil)
+                    }
+                    if self.retryOperation == .updateGame && self.status.state == "cancelled" && self.gameVersion != nil {
+                        self.retryOperation = .play
+                        self.status = Status(state: "ready", title: "Update cancelled", detail: "Play the installed release or check for updates again.", progress: nil)
                     }
                 }
             }
@@ -104,6 +113,9 @@ final class Launcher: ObservableObject {
                 // Progress already queued by the worker must not undo Cancel
                 // or permit another termination signal during cleanup.
                 if !cancellationRequested || ["cancelled", "error", "ready", "new", "update"].contains(next.state) {
+                    if ["ready", "new", "update"].contains(next.state) { gameVersion = next.gameVersion }
+                    if next.account == "signedIn" { accountStatus = "Signed in" }
+                    if next.account == "signedOut" { accountStatus = "Signed out" }
                     status = next
                 }
             }
@@ -141,14 +153,14 @@ final class Launcher: ObservableObject {
     }
 
     func retry() {
-        start(signOut: retryOperation == .signOut, updateGame: retryOperation == .updateGame)
+        start(signOut: retryOperation == .signOut, updateGame: retryOperation == .updateGame, signIn: retryOperation == .signIn)
     }
 
     func updateGame() {
         guard !running else { return }
         let alert = NSAlert()
         alert.messageText = "Update Minecraft?"
-        alert.informativeText = "Download the latest version available to your Microsoft account. Your worlds will be kept, with a backup of your current game and settings."
+        alert.informativeText = "Check the latest version available to your Microsoft account. Macrock downloads it only if it differs from the installed package."
         alert.addButton(withTitle: "Cancel")
         alert.addButton(withTitle: "Update")
         if alert.runModal() == .alertSecondButtonReturn { start(updateGame: true) }
@@ -310,48 +322,165 @@ struct StoreSettingsView: View {
 
 struct LauncherView: View {
     @ObservedObject var launcher: Launcher
-    private var fresh: Bool { launcher.status.state == "new" }
-    var body: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "cube.fill")
-                .font(.system(size: 66, weight: .medium))
-                .foregroundStyle(.green.gradient)
-                .accessibilityHidden(true)
-            VStack(spacing: 12) {
-                Text(launcher.status.title).font(.system(size: 29, weight: .semibold))
-                if fresh || !launcher.status.detail.isEmpty {
-                    Text(fresh ? "Sign in with the Microsoft account that owns Minecraft for Windows." : launcher.status.detail)
-                        .font(.body).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center).frame(maxWidth: 365).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if launcher.running && launcher.status.state != "playing" {
-                VStack(spacing: 10) {
-                    if let progress = launcher.status.progress {
-                        ProgressView(value: progress).accessibilityLabel("Installation progress")
-                    } else { ProgressView().controlSize(.small) }
-                }.frame(width: 300)
-                if launcher.canCancel {
-                    Button("Cancel") { launcher.cancel() }
-                        .buttonStyle(.plain).foregroundStyle(.secondary)
-                        .keyboardShortcut(.cancelAction)
-                }
-            } else if !launcher.running {
-                Button(launcher.status.state == "error" ? "Try Again" : fresh ? "Install & Play" : ["cancelled", "update"].contains(launcher.status.state) ? "Continue" : "Play") {
-                    launcher.retry()
-                }
-                .buttonStyle(.borderedProminent).tint(.green)
-                .controlSize(.large).keyboardShortcut(.defaultAction)
-                if fresh {
-                    Text("Minecraft downloads after sign-in.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if launcher.status.state == "error" {
-                Button("Open Setup Log") { launcher.showLog() }.buttonStyle(.link)
-            }
+    private let mint = Color(red: 0.42, green: 0.94, blue: 0.72)
+    private var state: String { launcher.status.state }
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development"
+    }
+    private var playLabel: String {
+        switch state {
+        case "error": "Try Again"
+        case "new": "Install & Play"
+        case "cancelled", "update": "Continue"
+        default: "Play"
         }
-        .padding(40).frame(width: 480, height: 390)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Label("Macrock", systemImage: "cube.transparent.fill")
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                    .foregroundStyle(mint)
+                Spacer()
+                Text("Launcher " + appVersion)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.white.opacity(0.72))
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .background(.white.opacity(0.08), in: Capsule())
+            }
+
+            hero
+
+            HStack(alignment: .top, spacing: 14) {
+                detailCard("Game version", icon: "square.stack.3d.up", value: launcher.gameVersion ?? "Not installed") {
+                    Menu("Version options") {
+                        if let version = launcher.gameVersion {
+                            Button("Play " + version) { launcher.start() }
+                            Button("Check for updates…") { launcher.updateGame() }
+                        } else {
+                            Button("Install latest release") { launcher.start() }
+                        }
+                    }
+                    .disabled(launcher.running)
+                }
+                detailCard("Account", icon: "person.crop.circle", value: launcher.accountStatus) {
+                    Menu("Manage account") {
+                        Button("Sign in with Microsoft…") { launcher.start(signIn: true) }
+                        Button("Sign out…") { launcher.signOut() }
+                        Link("Create a Microsoft account", destination: URL(string: "https://signup.live.com/")!)
+                    }
+                    .disabled(launcher.running)
+                }
+            }
+
+            HStack(spacing: 16) {
+                Button("Game Data", systemImage: "folder") { NSWorkspace.shared.open(launcher.root) }
+                Button("Setup Logs", systemImage: "doc.text.magnifyingglass") { launcher.showLog() }
+                Spacer()
+                SettingsLink { Label("Settings", systemImage: "gearshape") }
+            }
+            .buttonStyle(.plain)
+            .font(.callout)
+            .foregroundStyle(.white.opacity(0.75))
+        }
+        .padding(24)
+        .frame(width: 720)
+        .background(Color(red: 0.055, green: 0.075, blue: 0.09))
+        .preferredColorScheme(.dark)
+    }
+
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("MINECRAFT")
+                .font(.caption.monospaced().weight(.semibold))
+                .tracking(3)
+                .foregroundStyle(mint)
+            Text("Bedrock Edition")
+                .font(.system(size: 38, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .accessibilityAddTraits(.isHeader)
+            Text(launcher.status.title)
+                .font(.headline)
+                .foregroundStyle(.white.opacity(0.92))
+            let detail = state == "new" && launcher.status.detail.isEmpty
+                ? "Sign in with the account that owns Minecraft for Windows."
+                : launcher.status.detail
+            if !detail.isEmpty {
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 14) {
+                if launcher.running && state != "playing" {
+                    if let progress = launcher.status.progress {
+                        ProgressView(value: progress)
+                            .tint(mint)
+                            .frame(maxWidth: 220)
+                            .accessibilityLabel("Installation progress")
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                    if launcher.canCancel {
+                        Button("Cancel") { launcher.cancel() }
+                            .keyboardShortcut(.cancelAction)
+                    }
+                } else if !launcher.running {
+                    Button(playLabel, systemImage: "play.fill") { launcher.retry() }
+                        .buttonStyle(PlayButtonStyle(color: mint))
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(26)
+        .background(alignment: .trailing) {
+            RoundedRectangle(cornerRadius: 22)
+                .fill(LinearGradient(colors: [Color(red: 0.075, green: 0.19, blue: 0.17),
+                                              Color(red: 0.13, green: 0.28, blue: 0.23)],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .overlay(alignment: .trailing) {
+                    Image(systemName: "cube.transparent.fill")
+                        .font(.system(size: 178, weight: .ultraLight))
+                        .rotationEffect(.degrees(-14))
+                        .foregroundStyle(mint.opacity(0.13))
+                        .padding(.trailing, 18)
+                        .accessibilityHidden(true)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 22))
+        }
+    }
+
+    private func detailCard<Actions: View>(_ title: String, icon: String, value: String,
+                                          @ViewBuilder actions: () -> Actions) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(mint)
+            Text(value)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.white)
+            actions()
+                .controlSize(.regular)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct PlayButtonStyle: ButtonStyle {
+    let color: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(.black)
+            .padding(.horizontal, 22)
+            .frame(minHeight: 44)
+            .background(color.opacity(configuration.isPressed ? 0.75 : 1), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
@@ -361,7 +490,7 @@ struct BedrockLauncherApp: App {
     @StateObject private var launcher = Launcher()
     @Environment(\.openWindow) private var openWindow
     var body: some Scene {
-        WindowGroup("Bedrock for Mac", id: "launcher") {
+        WindowGroup("Macrock", id: "launcher") {
             LauncherView(launcher: launcher)
                 .background(LauncherWindowAttachment { delegate.attachWindow($0) })
                 .onAppear {
@@ -382,7 +511,7 @@ struct BedrockLauncherApp: App {
             }
             CommandGroup(replacing: .help) {
                 Button("Open Game Data") { NSWorkspace.shared.open(launcher.root) }
-                Button("Bedrock for Mac Help") {
+                Button("Macrock Help") {
                     NSWorkspace.shared.open(URL(string: "https://github.com/1JRobertson/bedrock-mac#readme")!)
                 }
                 Button("Open Setup Logs") { launcher.showLog() }

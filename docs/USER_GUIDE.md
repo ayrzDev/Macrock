@@ -26,11 +26,29 @@ apply to a complete bundle.
   temporary files. This is not the storage budget for compiling the project.
 
 The current launcher verifies the account on each Play action. It has no
-supported offline-launch mode. Choose **Bedrock for Mac → Settings…** to set
+supported offline-launch mode. Choose **Macrock → Settings…** to set
 your Microsoft Store country using a two-letter code, such as `CA`, `US`, `GB`
 or `TR`, then choose **Save**. The default is `CA`. The saved country applies
 to your next Play or game update; wait for setup or Minecraft to finish before
 changing it. The CLI also accepts `--market`.
+
+The Macrock home screen shows the launcher build and the installed game version.
+**Version options** plays the installed copy or checks the latest release
+offered to the account by Microsoft. Macrock compares the signed package header
+with the catalog before downloading. Cancelling an update returns the primary
+button to Play for the installed release. The catalog flow does not offer
+arbitrary older builds or Preview builds.
+
+Use **Manage account** to sign in before installing or playing, sign out to
+switch accounts, or open Microsoft's account creation page. **Play** still
+verifies ownership and uses one helper for the game session.
+
+In Minecraft, choosing a different Xbox account from its account picker opens
+the Microsoft sign-in window. Ownership and the license stay with the account
+signed in to Macrock; only the gamertag and friends in the game change. The
+choice is remembered until you sign out in Macrock. This needs a runtime built
+with `standalone-wine-xuser-zz-switch-account.patch` and has not yet been checked
+in the game.
 
 ## Install, sign in, and play
 
@@ -179,6 +197,8 @@ to clear its saved user session. No automatic CrossOver world migration exists.
 | Keychain access denied | Retry and handle the macOS prompt yourself. Do not delete credentials as a first troubleshooting step. |
 | Keychain prompt on every launch | Check whether you chose **Allow** instead of **Always Allow**, or rebuilt/replaced the helper. Report prompts from an unchanged build separately. |
 | Purchase or content-license error | Verify the signed-in account owns Minecraft for Windows. Sign out and switch accounts if needed. |
+| Store device limit | Unlink an unused device at [account.microsoft.com/devices/content](https://account.microsoft.com/devices/content), then try again. |
+| License check did not finish | Check the connection and try again. Play asks Microsoft for this account’s Windows license on the next attempt. |
 | Game/component connection error | Check connectivity, then retry. Report the exact stage if it persists; a successful Microsoft login does not prove the download service is reachable. |
 | Incomplete existing game | Close Minecraft and choose **Update Minecraft…** to repair using a fresh owned-game download. Keep worlds and backups; never remove `bottles` to repair a download. |
 | Another setup/helper is running | Return to the active launcher, finish or cancel setup, or quit Minecraft normally. Do not delete `/tmp/xodus.sock` or kill every Wine process. If the conflict persists after a normal restart, report it. |

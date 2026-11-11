@@ -26,6 +26,49 @@ runtime_spec.loader.exec_module(runtime)
 
 
 class OnboardingTests(unittest.TestCase):
+    def test_current_package_check_cleans_journal_without_touching_installed_game(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session, _, prefix = self.update_fixture(root)
+            session.AccountError = runtime.AccountError
+
+            @contextlib.contextmanager
+            def already_current(destination, **kwargs):
+                self.assertEqual(kwargs['current_game'], root / 'game')
+                self.assertFalse(destination.exists())
+                raise runtime.AccountError('already_current')
+                yield
+
+            session.account = already_current
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'BUNDLE', None), \
+                    patch.object(worker, 'load', return_value=session), \
+                    patch.object(worker, 'maintenance_lock', return_value=contextlib.nullcontext()), \
+                    patch.object(worker, 'validate_install'), patch.object(worker, 'installed', return_value=True), \
+                    patch.object(worker, 'run') as run, \
+                    patch.object(worker.shutil, 'disk_usage', return_value=SimpleNamespace(free=100 * 1024**3)), \
+                    patch('sys.argv', ['setup.py', '--update-game']), contextlib.redirect_stdout(io.StringIO()) as output:
+                worker.main()
+            run.assert_not_called()
+            self.assertFalse((root / '.minecraft-update').exists())
+            self.assertEqual((root / 'game/Minecraft.Windows.exe').read_bytes(), b'MZold')
+            self.assertEqual((prefix / 'world').read_bytes(), b'original world')
+            self.assertEqual(json.loads(output.getvalue().splitlines()[-1])['title'], 'Minecraft is up to date')
+
+    def test_sign_in_reports_account_without_downloading_or_launching(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(worker, 'ROOT', root), patch.object(worker, 'BUNDLE', None), \
+                    patch.object(worker, 'installed', return_value=False), \
+                    patch.object(worker, 'validate_install'), patch.object(worker, 'run') as run, \
+                    patch.object(worker, 'install') as install, \
+                    patch('sys.argv', ['setup.py', '--sign-in']), contextlib.redirect_stdout(io.StringIO()) as output:
+                worker.main()
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0][-2:], ['--sign-in', root / 'game'])
+            install.assert_not_called()
+            self.assertFalse((root / 'game').exists())
+            self.assertEqual(json.loads(output.getvalue().splitlines()[-1])['account'], 'signedIn')
+
     def test_invalid_market_is_rejected_before_data_or_account_access(self):
         for market in ('', 'T', 'TUR', 'tr', 'T1', 'ＴＲ', '../TR'):
             with self.subTest(market=market), tempfile.TemporaryDirectory() as temporary:
@@ -1097,11 +1140,13 @@ class OnboardingTests(unittest.TestCase):
             root = Path(temporary)
             (root / 'game').mkdir()
             (root / 'game/Minecraft.Windows.exe').write_bytes(b'MZfixture')
+            (root / 'game/MicrosoftGame.Config').write_text('<Game><Identity Version="1.2.3.4" /></Game>')
             with patch.object(worker, 'ROOT', root), patch.object(worker, 'installed', return_value=False), \
                     patch.object(worker, 'initialize_bundle') as initialize, patch.object(worker, 'run') as run, \
                     patch('sys.argv', ['setup.py', '--status']), contextlib.redirect_stdout(io.StringIO()) as output:
                 worker.main()
             self.assertEqual(json.loads(output.getvalue())['state'], 'update')
+            self.assertEqual(json.loads(output.getvalue())['gameVersion'], '1.2.3.4')
             initialize.assert_not_called()
             run.assert_not_called()
             self.assertFalse((root / 'logs').exists())

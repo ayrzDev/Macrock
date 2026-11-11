@@ -1,0 +1,331 @@
+diff --git a/crates/xodus/src/licensing/content.rs b/crates/xodus/src/licensing/content.rs
+--- a/crates/xodus/src/licensing/content.rs
++++ b/crates/xodus/src/licensing/content.rs
+@@ -13,13 +13,21 @@
+ 
+ #[derive(Debug, thiserror::Error)]
+ pub enum LicenseContentError {
+-    #[error("request error: {0}")]
++    #[error("request error")]
+     Request(#[from] reqwest::Error),
+ 
++    /// Numeric status only. The body is not part of this error.
++    #[error("license http status {0}")]
++    Http(u16),
++
+     /// The account has no entitlement for the requested content (not owned, or
+-    /// not covered by the account's current subscription tier).
+-    #[error("not entitled to this content: {description}")]
+-    NotEntitled { description: String },
++    /// not covered by the account's current subscription tier). Code 501 is the
++    /// Store device-group limit. The service description is not retained.
++    #[error("not entitled to this content: code={code}")]
++    NotEntitled { code: i64 },
++
++    #[error("license response had no content key")]
++    MissingKey,
+ }
+ 
+ // we might need a bump in xal-rs concerning reqwest,
+@@ -60,20 +68,41 @@
+         .send()
+         .await?;
+ 
+-    let content_res = response.json::<LicenseContentResponse>().await?;
++    let status = response.status().as_u16();
++    let bytes = response.bytes().await?;
++    if bytes.len() > 64 * 1024 {
++        return Err(LicenseContentError::Http(status));
++    }
++    let content_res = match serde_json::from_slice::<LicenseContentResponse>(&bytes) {
++        Ok(content) => content,
++        Err(_) if status == 200 => return Err(LicenseContentError::MissingKey),
++        Err(_) => return Err(LicenseContentError::Http(status)),
++    };
+     let content = match content_res {
+-        LicenseContentResponse::Success { license } => license,
++        LicenseContentResponse::Success { license } => {
++            if status != 200 {
++                return Err(LicenseContentError::Http(status));
++            }
++            license
++        }
+         LicenseContentResponse::SatisfactionFailure {
+             satisfaction_failure,
+         } => {
+             return Err(LicenseContentError::NotEntitled {
+-                description: satisfaction_failure.description,
++                code: satisfaction_failure.code,
+             });
+         }
+     };
+-    let license = &content.keys[0].value;
+-    let license = BASE64_STANDARD.decode(license).unwrap();
+-    let license = quick_xml::de::from_str::<License>(&String::from_utf8(license).unwrap()).unwrap();
++    let Some(encoded) = content.keys.first().map(|key| key.value.as_str()).filter(|value| !value.is_empty()) else {
++        return Err(LicenseContentError::MissingKey);
++    };
++    let Ok(license) = BASE64_STANDARD.decode(encoded) else {
++        return Err(LicenseContentError::MissingKey);
++    };
++    let Ok(license) = String::from_utf8(license) else {
++        return Err(LicenseContentError::MissingKey);
++    };
++    let license = quick_xml::de::from_str::<License>(&license).map_err(|_| LicenseContentError::MissingKey)?;
+     Ok((content, license))
+ }
+ 
+diff --git a/crates/xodus-cli/src/license.rs b/crates/xodus-cli/src/license.rs
+--- a/crates/xodus-cli/src/license.rs
++++ b/crates/xodus-cli/src/license.rs
+@@ -1,3 +1,4 @@
++use xodus::licensing::content::LicenseContentError;
+ use xodus::licensing::splicense::{DeviceKey, SPLicense};
+ use xodus::models::live::ExchangeUserTokenOutcome;
+ use xodus::models::secrets::Token;
+@@ -10,17 +11,17 @@
+     content_id: String,
+     market: String,
+ ) -> std::result::Result<(DeviceKey, SPLicense), String> {
+-    let dev_token = tokens.get_device_sts_token().unwrap();
+-    let Token::Legacy(dev_token) = dev_token else {
+-        return Err("Invalid STS token".to_string());
++    let Ok(Token::Legacy(dev_token)) = tokens.get_device_sts_token() else {
++        return Err("license_transient".to_string());
+     };
+-    let user = tokens.get_user().unwrap();
+-    let user_token = tokens.get_user_sts_token().unwrap();
+-    let Token::Legacy(legacy) = user_token else {
+-        return Err("Unspported user token".to_string());
++    let Ok(user) = tokens.get_user() else {
++        return Err("license_transient".to_string());
+     };
++    let Ok(Token::Legacy(legacy)) = tokens.get_user_sts_token() else {
++        return Err("license_transient".to_string());
++    };
+ 
+-    let ms_device_token = xodus::api::live::exchange_device_token(
++    let ms_device_token = match xodus::api::live::exchange_device_token(
+         client,
+         dev_token.clone(),
+         "{d6d5a677-0872-4ab0-9442-bb792fce85c5}".to_string(),
+@@ -28,9 +29,12 @@
+         Some(soap::PolicyReference::mbi_ssl()),
+     )
+     .await
+-    .unwrap();
++    {
++        Ok(response) => compact_ticket("device", response)?,
++        Err(_) => return Err("license_transient".to_string()),
++    };
+ 
+-    let user_token = xodus::api::live::exchange_user_token(
++    let user_token = match xodus::api::live::exchange_user_token(
+         client,
+         legacy,
+         user.username,
+@@ -44,32 +48,11 @@
+         )],
+     )
+     .await
+-    .expect("Failed to get ms user token");
+-
+-    let ms_device_token: Token = ms_device_token.into();
+-    let Token::Compact(ms_device_token) = ms_device_token else {
+-        return Err("Unsupported token".to_string());
++    {
++        Ok(response) => license_user_ticket(response)?,
++        Err(_) => return Err("license_transient".to_string()),
+     };
+ 
+-    let user_token: Token = match user_token {
+-        ExchangeUserTokenOutcome::Fault(_) => {
+-            return Err("Failed to get exchange MS token".to_string());
+-        }
+-        ExchangeUserTokenOutcome::Issued(
+-            soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
+-        ) => {
+-            let token = collection.security_tokens.remove(0);
+-            token.into()
+-        }
+-        ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponse(
+-            token,
+-        )) => (*token).into(),
+-        _ => unreachable!("Only responses are handled"),
+-    };
+-    let Token::Compact(user_token) = user_token else {
+-        return Err("Unsupported token".to_string());
+-    };
+-
+     let (content, game_license) = xodus::licensing::content::get_license_content(
+         client,
+         ms_device_token,
+@@ -79,20 +62,160 @@
+         market,
+     )
+     .await
+-    .map_err(|err| err.to_string())?;
++    .map_err(license_content_failure)?;
+ 
+     let game_splicense = SPLicense::parse_base64(&game_license.splicense_block)
+-        .expect("could not parse base64 game SPLicense");
++        .map_err(|_| "license_transient".to_string())?;
+ 
+-    let dev_license = tokens.get_device_license().unwrap();
++    let Ok(dev_license) = tokens.get_device_license() else {
++        return Err("license_transient".to_string());
++    };
+     let device_license = SPLicense::parse_base64(&dev_license.splicense)
+-        .expect("could not parse base64 device SPLicense");
+-    let key = device_license
+-        .encrypted_device_key
+-        .unwrap()
+-        .derive_device_key();
++        .map_err(|_| "license_transient".to_string())?;
++    let Some(key) = device_license.encrypted_device_key else {
++        return Err("license_transient".to_string());
++    };
++    let key = key.derive_device_key();
+     let candidate = xodus::licensing::content::offline_lease_candidate(
+         &content, &game_license, chrono::Utc::now().timestamp());
+     eprintln!("BEDROCK_OFFLINE_LICENSE:{}", if candidate { "candidate" } else { "unavailable" });
+     Ok((key, game_splicense))
+ }
++
++fn license_content_failure(error: LicenseContentError) -> String {
++    match error {
++        LicenseContentError::NotEntitled { code } => {
++            eprintln!("BEDROCK_LICENSE_DIAGNOSTIC:kind=not_entitled;code={code}");
++            format!("not_entitled:{code}")
++        }
++        LicenseContentError::Http(status) => {
++            eprintln!("BEDROCK_LICENSE_DIAGNOSTIC:kind=http;status={status}");
++            "license_transient".to_string()
++        }
++        LicenseContentError::Request(_) | LicenseContentError::MissingKey => {
++            eprintln!("BEDROCK_LICENSE_DIAGNOSTIC:kind=transient");
++            "license_transient".to_string()
++        }
++    }
++}
++
++fn ticket_current(expires: &str) -> bool {
++    chrono::DateTime::parse_from_rfc3339(expires)
++        .is_ok_and(|expires| expires.timestamp() > chrono::Utc::now().timestamp() + 60)
++}
++
++fn ticket_form(value: &str) -> &'static str {
++    if value.starts_with("eyJ") { "jwe" }
++    else if value.starts_with("d=") { "d" }
++    else if value.starts_with("t=") { "t" }
++    else { "plain" }
++}
++
++fn compact_ticket(role: &str, response: soap::RequestSecurityTokenResponse) -> Result<String, String> {
++    if !ticket_current(&response.lifetime.expires) {
++        return Err("license_transient".to_string());
++    }
++    let typed = match response.token_type.as_str() {
++        "urn:passport:compact" => "compact",
++        "urn:passport:delegationcompact" => "delegation",
++        _ => return Err("license_transient".to_string()),
++    };
++    let Some(binary) = response.requested_security_token.binary_security_token
++        .filter(|value| !value.value.is_empty()) else {
++        return Err("license_transient".to_string());
++    };
++    // Xbox prefixes a raw delegation ticket with "d=". A JWE, or a ticket that
++    // already has its prefix, is sent unchanged. Adding "d=" to a JWE makes
++    // the content-license service reject the real owner with HTTP 401.
++    let ticket = if matches!(ticket_form(&binary.value), "jwe" | "d" | "t") {
++        binary.value
++    } else if typed == "delegation" {
++        format!("d={}", binary.value)
++    } else {
++        binary.value
++    };
++    let address = if response.applies_to.endpoint_reference.address == "www.microsoft.com" { "microsoft" } else { "other" };
++    eprintln!("BEDROCK_LICENSE_DIAGNOSTIC:kind=ticket;role={role};typed={typed};form={};address={address}", ticket_form(&ticket));
++    Ok(ticket)
++}
++
++/// Microsoft returns the refreshed legacy STS and the service ticket in either
++/// order. The license request needs the service ticket; the first element is
++/// not that ticket.
++fn license_user_ticket(outcome: ExchangeUserTokenOutcome) -> Result<String, String> {
++    let responses = match outcome {
++        ExchangeUserTokenOutcome::Fault(_) => return Err("license_transient".to_string()),
++        ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponseCollection(collection)) => {
++            collection.security_tokens
++        }
++        ExchangeUserTokenOutcome::Issued(soap::BodyContent::RequestSecurityTokenResponse(token)) => vec![*token],
++        ExchangeUserTokenOutcome::Issued(_) => return Err("license_transient".to_string()),
++    };
++    let mut ticket = None;
++    for response in responses {
++        if response.token_type == "urn:passport:legacy" {
++            continue;
++        }
++        let value = compact_ticket("user", response)?;
++        if ticket.replace(value).is_some() {
++            return Err("license_transient".to_string());
++        }
++    }
++    ticket.ok_or_else(|| "license_transient".to_string())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn lifetime(expires: &str) -> soap::Timestamp {
++        soap::Timestamp { id: None, created: "2026-01-01T00:00:00Z".into(), expires: expires.into() }
++    }
++
++    fn compact(kind: &str, value: &str, expires: &str) -> soap::RequestSecurityTokenResponse {
++        soap::RequestSecurityTokenResponse {
++            token_type: kind.into(),
++            applies_to: soap::AppliesTo { endpoint_reference: soap::EndpointReference { address: "www.microsoft.com".into() } },
++            lifetime: lifetime(expires),
++            requested_security_token: soap::RequestedSecurityToken {
++                encrypted_data: None,
++                binary_security_token: Some(soap::BinarySecurityTokenRes {
++                    id: "fixture".into(), value: value.into(), value_type: None }),
++            },
++            requested_proof_token: None,
++        }
++    }
++
++    fn issued(responses: Vec<soap::RequestSecurityTokenResponse>) -> ExchangeUserTokenOutcome {
++        ExchangeUserTokenOutcome::Issued(
++            soap::BodyContent::RequestSecurityTokenResponseCollection(
++                soap::RequestSecurityTokenResponseCollection { security_tokens: responses }))
++    }
++
++    #[test]
++    fn license_ticket_uses_the_service_token_when_a_legacy_renewal_comes_first() {
++        let future = "2050-01-01T00:00:00Z";
++        let legacy = compact("urn:passport:legacy", "renewal-not-a-license-ticket", future);
++        let service = compact("urn:passport:delegationcompact", "service-ticket", future);
++        assert_eq!(license_user_ticket(issued(vec![legacy, service])).unwrap(), "d=service-ticket");
++        let jwe = compact("urn:passport:delegationcompact", "eyJhbGciOiJub25lIn0.payload.sig", future);
++        assert_eq!(license_user_ticket(issued(vec![jwe])).unwrap(), "eyJhbGciOiJub25lIn0.payload.sig");
++
++        let compact_ticket = compact("urn:passport:compact", "plain-service-ticket", future);
++        let legacy = compact("urn:passport:legacy", "renewal-not-a-license-ticket", future);
++        assert_eq!(license_user_ticket(issued(vec![compact_ticket, legacy])).unwrap(), "plain-service-ticket");
++    }
++
++    #[test]
++    fn license_ticket_rejects_a_renewal_fault_or_ambiguous_service_token() {
++        let future = "2050-01-01T00:00:00Z";
++        let legacy = compact("urn:passport:legacy", "renewal-only", future);
++        assert!(license_user_ticket(issued(vec![legacy])).is_err());
++        assert!(license_user_ticket(ExchangeUserTokenOutcome::Fault(None)).is_err());
++        let first = compact("urn:passport:compact", "one", future);
++        let second = compact("urn:passport:compact", "two", future);
++        assert!(license_user_ticket(issued(vec![first, second])).is_err());
++        let expired = compact("urn:passport:compact", "stale", "2020-01-01T00:00:00Z");
++        assert!(license_user_ticket(issued(vec![expired])).is_err());
++    }
++}

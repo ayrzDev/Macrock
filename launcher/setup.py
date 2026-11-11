@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import platform
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,8 @@ ACCOUNT_ERRORS = {
     'package_segments': 'Could not read the game’s download segments. The launcher needs an update.',
     'package_filesystem': 'Could not read the game’s package filesystem. The launcher needs an update.',
     'content_license': 'Microsoft could not verify a Minecraft for Windows license for this account.',
+    'device_limit': 'This Microsoft account has reached its Store device limit. Unlink an unused device at account.microsoft.com/devices/content, then try again.',
+    'license_transient': 'Microsoft’s license check did not finish. Check your connection, then try again.',
     'download_failed': 'Minecraft preparation stopped. Open the setup log for details.',
 }
 
@@ -77,8 +80,29 @@ BUNDLE_LINKS = {
 }
 
 
-def event(state, title, detail='', progress=None):
-    print(json.dumps(dict(state=state, title=title, detail=detail, progress=progress)), flush=True)
+def installed_game_version():
+    if not (ROOT / 'game/Minecraft.Windows.exe').is_file():
+        return None
+    try:
+        with (ROOT / 'game/MicrosoftGame.Config').open('rb') as stream:
+            data = stream.read(128 * 1024 + 1)
+        if len(data) > 128 * 1024:
+            return None
+        config = xml.etree.ElementTree.fromstring(data)
+        identity = config.find('Identity')
+        version = identity.get('Version', '') if identity is not None else ''
+        return version if re.fullmatch(r'[0-9]{1,5}(?:\.[0-9]{1,5}){3}', version) else None
+    except (OSError, xml.etree.ElementTree.ParseError):
+        return None
+
+
+def event(state, title, detail='', progress=None, *, account=None):
+    payload = dict(state=state, title=title, detail=detail, progress=progress)
+    if state in ('ready', 'new', 'update'):
+        payload['gameVersion'] = installed_game_version()
+    if account is not None:
+        payload['account'] = account
+    print(json.dumps(payload), flush=True)
 
 
 def script_path(filename):
@@ -231,6 +255,8 @@ def validate_install():
                 ROOT / 'runtime/standalone/dxmt/manifest.json',
                 ROOT / 'sources/xodus/target/release/examples/standalone_helper')
     if not all(path.is_file() for path in required):
+        if not BUNDLE:
+            raise RuntimeError('The launcher runtime needs setup. Run ./Start.command --runtime-only in the project folder, then try Play again.')
         raise RuntimeError('This app is missing its bundled runtime. Use a complete build of Bedrock for Mac.')
     if not (ROOT / 'game/Minecraft.Windows.exe').is_file() and shutil.disk_usage(ROOT).free < 8 * 1024**3:
         raise RuntimeError('Free up at least 8 GB for Minecraft, then try again.')
@@ -365,7 +391,7 @@ def initialize_session_bundle():
 
 
 @contextlib.contextmanager
-def update_account(runtime, destination, market='CA'):
+def update_account(runtime, destination, market='CA', *, current_game=None):
     # The helper arms its own parent-lifetime guardian before sign-in. It waits
     # for account() to publish its session record before creating any socket,
     # closing the worker-death race between Popen and the record write.
@@ -375,6 +401,7 @@ def update_account(runtime, destination, market='CA'):
     os.environ.update(changes)
     try:
         with runtime.account(destination, market=market, download=True,
+                             current_game=current_game,
                              progress=lambda line: account_update(line, updating=True)):
             yield
     finally:
@@ -412,8 +439,8 @@ def update_minecraft(runtime, log, market='CA'):
         if initial.exists():
             shutil.rmtree(initial)
     try:
-        event('busy', 'Updating Minecraft', 'Downloading the latest version available to your Microsoft account.', 0.2)
-        with update_account(runtime, transaction / 'download', market):
+        event('busy', 'Checking for updates', 'Looking for the latest release available to your Microsoft account.', 0.2)
+        with update_account(runtime, transaction / 'download', market, current_game=game):
             run([sys.executable, script_path('standalone-setup.py'), '--threading'], log,
                 'Could not download the Microsoft game component. Check your connection and retry.')
             runtime.prerequisites(transaction / 'download')
@@ -454,6 +481,7 @@ def main():
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument('--status', action='store_true')
     operation.add_argument('--sign-out', action='store_true')
+    operation.add_argument('--sign-in', action='store_true')
     operation.add_argument('--update-game', action='store_true')
     parser.add_argument('--market', default='CA', help='Two-letter uppercase Store country code')
     args = parser.parse_args()
@@ -491,17 +519,24 @@ def main():
                         try:
                             update_minecraft(runtime, log, args.market)
                         except runtime.AccountError as error:
+                            if error.code == 'already_current':
+                                event('ready' if installed() else 'update', 'Minecraft is up to date',
+                                      'The installed release is already current.')
+                                return
                             raise RuntimeError(ACCOUNT_ERRORS.get(error.code, str(error))) from error
                         return
         initialize_session_bundle()
         with (folder / 'onboarding.log').open('ab') as log:
             ready = installed()
-            if args.sign_out:
+            if args.sign_out or args.sign_in:
                 helper = ROOT / 'sources/xodus/target/release/examples/standalone_helper'
-                event('busy', 'Signing out')
-                run([helper.resolve(), '--sign-out', ROOT / 'game'], log,
-                    'Could not sign out. Close Minecraft and try again.', account_progress=True)
-                event('ready' if ready else 'new', 'Signed out', 'Choose Play to sign in with another Microsoft account.' if ready else '')
+                if args.sign_in:
+                    validate_install()
+                event('busy', 'Signing in to Microsoft' if args.sign_in else 'Signing out')
+                run([helper.resolve(), '--sign-in' if args.sign_in else '--sign-out', ROOT / 'game'], log,
+                    'Could not finish the account operation. Close Minecraft and try again.', account_progress=True)
+                event('ready' if ready else 'new', 'Signed in' if args.sign_in else 'Signed out',
+                      account='signedIn' if args.sign_in else 'signedOut')
                 return
             validate_install()
             if (ROOT / 'game').exists() and not (ROOT / 'game/Minecraft.Windows.exe').is_file():
@@ -520,7 +555,7 @@ def main():
                         'Minecraft stopped unexpectedly. Open the setup log for details, then try again.')
             except runtime.AccountError as error:
                 raise RuntimeError(ACCOUNT_ERRORS.get(error.code, str(error))) from error
-            event('ready', 'Ready to play')
+            event('ready', 'Ready to play', account='signedIn')
 
 
 def cancel(_signal, _frame):
