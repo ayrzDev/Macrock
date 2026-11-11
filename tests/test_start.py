@@ -388,7 +388,7 @@ sys.exit(start.cli())
                 patch.object(start, 'module', return_value=bootstrap), \
                 patch.object(start, 'native_dependencies', return_value=prefix) as dependencies, \
                 patch.dict(os.environ, {'PATH': '/usr/bin:/bin'}):
-            start.setup(2, 'US')
+            start.setup(2, 'US', runtime_only=True)
             self.assertTrue(os.environ['PATH'].startswith('/opt/homebrew/opt/python@3.13/libexec/bin:'))
         dependencies.assert_called_once_with('/opt/homebrew/opt/python@3.13/bin/python3.13', 2)
         self.assertEqual(recorded[0][0], 'wine')
@@ -403,6 +403,7 @@ sys.exit(start.cli())
         self.assertIn('client/standalone-xvd.rs', helper_inputs)
         self.assertIn('patches/account.patch', helper_inputs)
         self.assertEqual(run.call_args_list[0].args[0][-1], str(self.root / 'tools/install-build-tools.sh'))
+        self.assertEqual(len(run.call_args_list), 2, 'Runtime builds must leave Microsoft acquisition to Play')
 
     def test_source_update_refreshes_generated_helper_before_existing_tree_verification(self):
         source = Path(__file__).resolve().parents[1]

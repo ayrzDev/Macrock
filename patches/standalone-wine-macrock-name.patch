@@ -1,0 +1,25 @@
+diff --git a/loader/wine_info.plist.in b/loader/wine_info.plist.in
+--- a/loader/wine_info.plist.in
++++ b/loader/wine_info.plist.in
+@@ -13,7 +13,9 @@
+     <key>CFBundleInfoDictionaryVersion</key>
+     <string>6.0</string>
+     <key>CFBundleName</key>
+-    <string>Wine</string>
++    <string>Macrock</string>
++    <key>CFBundleDisplayName</key>
++    <string>Macrock</string>
+     <key>CFBundlePackageType</key>
+     <string>APPL</string>
+     <key>CFBundleShortVersionString</key>
+diff --git a/dlls/winemac.drv/winemac.rc b/dlls/winemac.drv/winemac.rc
+--- a/dlls/winemac.drv/winemac.rc
++++ b/dlls/winemac.drv/winemac.rc
+@@ -29,6 +29,6 @@ LANGUAGE LANG_ENGLISH, SUBLANG_DEFAULT
+ STRINGTABLE
+ {
+-    STRING_MENU_WINE                        "Wine"
++    STRING_MENU_WINE                        "Macrock"
+     STRING_MENU_ITEM_HIDE_APPNAME           "Hide %@"
+     STRING_MENU_ITEM_HIDE                   "Hide"
+     STRING_MENU_ITEM_HIDE_OTHERS            "Hide Others"

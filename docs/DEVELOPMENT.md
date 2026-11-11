@@ -107,6 +107,32 @@ check. Inspect `df -h .`, leave room for source, compiler output, archives, and
 both app/DMG copies, and use a separate backup location for worlds. No measured
 minimum build-space requirement or build-time guarantee is established.
 
+## Build a launcher for this checkout
+
+For a native launcher tied to this checkout, run `./Start.command --runtime-only`
+and `./tools/build-launcher.sh`. Move the resulting `build/Bedrock for Mac.app`
+to Applications and keep the checkout at the same path. Open the app and choose
+**Install & Play** to sign in and acquire the game. The runtime build leaves
+game acquisition to Play, so the launcher keeps one helper through first setup
+and gameplay. The app stores its game and worlds in the checkout.
+
+### Offline license diagnostic
+
+The online content-license flow reports `BEDROCK_OFFLINE_LICENSE:candidate`
+when Microsoft's response includes an unexpired offline lease matching the
+machine-bound content key. Otherwise it reports `unavailable`. The diagnostic
+does not expose or store license data and does not change the launch decision.
+It does not verify a lease signature, designate an offline PC, or establish
+that Wine can start Minecraft and load the expected profile offline.
+
+The device, lease type and expiry checks follow the response fields documented
+in the [Xodus Nexus offline licensing patches](https://github.com/domsvoboda/xodus-nexus/tree/backend-v0.2.13/assets).
+Microsoft's [PC licensing model](https://learn.microsoft.com/en-us/gaming/gdk/docs/store/commerce/fundamentals/xstore-product-sharing-model-for-games)
+requires a designated offline PC, initial online acquisition and periodic
+renewal. A future launch path also needs secure storage bound to the local
+account, device and content, revocation on explicit refusal, and native tests
+with a disposable world and the connection unavailable.
+
 ## Build a complete local app
 
 Clone the repository into a directory you control, then run:

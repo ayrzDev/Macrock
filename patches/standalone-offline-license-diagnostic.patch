@@ -1,0 +1,143 @@
+diff --git a/crates/xodus/src/licensing/content.rs b/crates/xodus/src/licensing/content.rs
+index 50ed7e3..eecefff 100644
+--- a/crates/xodus/src/licensing/content.rs
++++ b/crates/xodus/src/licensing/content.rs
+@@ -77,6 +77,116 @@ pub async fn get_license_content(
+     Ok((content, license))
+ }
+ 
++/// Report a candidate for future offline playback. This classification does
++/// not authorize playback, persist license material, or change the request.
++pub fn offline_lease_candidate(content: &LicenseContent, key: &License, now: i64) -> bool {
++    if !key.binding.binding_type.eq_ignore_ascii_case("Machine")
++        || !key.binding.lease_required.as_deref().is_some_and(|value| value.eq_ignore_ascii_case("true"))
++    {
++        return false;
++    }
++    let Some(device) = key.binding.device_id.as_deref().filter(|value| !value.is_empty()) else {
++        return false;
++    };
++    content.leases.iter().take(32).any(|lease| {
++        let value = &lease.value;
++        if value.is_empty() || value.len() > 128 * 1024 {
++            return false;
++        }
++        let Ok(xml) = BASE64_STANDARD.decode(value) else { return false; };
++        let Ok(lease) = quick_xml::de::from_reader::<_, OfflineLease>(xml.as_slice()) else {
++            return false;
++        };
++        lease.license_info.kind == "Lease"
++            && lease.binding.device_id == device
++            && lease.license_info.expiration_date.as_deref().is_none_or(|date| {
++                lease_time(date).is_some_and(|seconds| seconds > now)
++            })
++            && offline_policy_valid(&lease.custom_policies, now)
++    })
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "PascalCase")]
++struct OfflineLease {
++    license_info: OfflineLeaseInfo,
++    binding: OfflineLeaseBinding,
++    custom_policies: String,
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "PascalCase")]
++struct OfflineLeaseInfo {
++    #[serde(rename = "@Type")]
++    kind: String,
++    expiration_date: Option<String>,
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "PascalCase")]
++struct OfflineLeaseBinding {
++    device_id: String,
++}
++
++#[derive(serde::Deserialize)]
++#[serde(rename_all = "camelCase")]
++struct OfflinePolicy {
++    is_offline: bool,
++    expires_at: String,
++}
++
++fn lease_time(value: &str) -> Option<i64> {
++    chrono::DateTime::parse_from_rfc3339(value)
++        .map(|date| date.timestamp())
++        .or_else(|_| {
++            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
++                .map(|date| date.and_utc().timestamp())
++        })
++        .ok()
++}
++
++fn offline_policy_valid(encoded: &str, now: i64) -> bool {
++    if encoded.len() > 64 * 1024 {
++        return false;
++    }
++    BASE64_STANDARD.decode(encoded)
++        .ok()
++        .and_then(|bytes| serde_json::from_slice::<OfflinePolicy>(&bytes).ok())
++        .is_some_and(|policy| policy.is_offline
++            && chrono::DateTime::parse_from_rfc3339(&policy.expires_at)
++                .is_ok_and(|date| date.timestamp() > now))
++}
++
++#[cfg(test)]
++mod offline_lease_tests {
++    use super::*;
++
++    fn content(device: &str, offline: bool, expiration: &str) -> LicenseContent {
++        let policy = BASE64_STANDARD.encode(serde_json::json!({
++            "isOffline": offline, "expiresAt": "2027-01-01T00:00:00Z"
++        }).to_string());
++        let lease = BASE64_STANDARD.encode(format!(
++            r#"<License><LicenseInfo Type="Lease"><ExpirationDate>{expiration}</ExpirationDate></LicenseInfo><Binding><DeviceId>{device}</DeviceId></Binding><CustomPolicies>{policy}</CustomPolicies></License>"#
++        ));
++        serde_json::from_value(serde_json::json!({"keys": [], "leases": [{"value": lease}]})).unwrap()
++    }
++
++    #[test]
++    fn offline_lease_candidate_requires_the_same_machine_and_live_policy() {
++        let xml = r#"<License><SPLicenseBlock>fixture</SPLicenseBlock><LicenseInfo Type="Full"/><Binding Binding_Type="Machine"><DeviceId>fixture-device</DeviceId><LeaseRequired>true</LeaseRequired></Binding></License>"#;
++        let key: License = quick_xml::de::from_str(xml).unwrap();
++        let now = 1_790_000_000;
++        let future = "2026-12-01T00:00:00";
++        assert!(offline_lease_candidate(&content("fixture-device", true, future), &key, now));
++        assert!(!offline_lease_candidate(&content("other-device", true, future), &key, now));
++        assert!(!offline_lease_candidate(&content("fixture-device", false, future), &key, now));
++        assert!(!offline_lease_candidate(&content("fixture-device", true, "2020-01-01T00:00:00"), &key, now));
++        assert!(!offline_lease_candidate(&content("fixture-device", true, future), &key, 1_900_000_000));
++        let roaming: License = quick_xml::de::from_str(&xml.replace("Machine", "User")).unwrap();
++        assert!(!offline_lease_candidate(&content("fixture-device", true, future), &roaming, now));
++    }
++}
++
+ pub async fn get_license_token(
+     client: &reqwest::Client,
+     device_ms_token: String,
+diff --git a/crates/xodus-cli/src/license.rs b/crates/xodus-cli/src/license.rs
+index b90fa61..7cf847d 100644
+--- a/crates/xodus-cli/src/license.rs
++++ b/crates/xodus-cli/src/license.rs
+@@ -70,7 +70,7 @@ pub async fn get_license(
+         return Err("Unsupported token".to_string());
+     };
+ 
+-    let (_content, game_license) = xodus::licensing::content::get_license_content(
++    let (content, game_license) = xodus::licensing::content::get_license_content(
+         client,
+         ms_device_token,
+         user_token,
+@@ -91,5 +91,8 @@ pub async fn get_license(
+         .encrypted_device_key
+         .unwrap()
+         .derive_device_key();
++    let candidate = xodus::licensing::content::offline_lease_candidate(
++        &content, &game_license, chrono::Utc::now().timestamp());
++    eprintln!("BEDROCK_OFFLINE_LICENSE:{}", if candidate { "candidate" } else { "unavailable" });
+     Ok((key, game_splicense))
+ }

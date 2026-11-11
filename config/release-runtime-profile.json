@@ -42,13 +42,15 @@
     "native/graphics/standalone-dxmt-display-trace.c": "d678921fcf0165981e085ef6d2df60b7d79ead17f6af53333ad830cb48e6070a",
     "patches/standalone-wine-dxmt-abi.patch": "ef509d6c3e2124385cdf056d69bd2b34444fb48f569499bf11a12d5f6238c5fe",
     "patches/standalone-wine-idl-list.patch": "814a975ebe0c1d48f61de232f05e03755450e98d6cc94e99d4f09e774a2dd058",
+    "patches/standalone-wine-macrock-name.patch": "6198c41d82101efeed7b25509d469a6a0266fb4edf2eb075c126c6a5f8e7fb53",
     "patches/standalone-wine-storage-linkage.patch": "9048fc6070059ddf874f14767021d625e4bc5363792c262f6426a767308d12f7",
     "patches/standalone-wine-user-privileges.patch": "2de07b531a17a8535f05e47009be33ba351dced48b8398412860ee2f0d221aed",
     "patches/standalone-wine-xuser-realms.patch": "f07ba43c6c13190d974bb8e84621f01766a7c03c9818928808ee507a68390477",
     "patches/standalone-wine-xuser-token-refresh.patch": "d7694c51561f0620f1df4cb5f1ab418be338be70cbfe3beaba24254a0265fdd4",
     "patches/standalone-wine-xuser-z-device-auth.patch": "26668fdc4b56f5eacc4a92ecbf9904884923cc09d343b5ee31f314c1ebbcf79f",
+    "patches/standalone-wine-xuser-zz-switch-account.patch": "544ad1ed9a498e05e42ff44f2b6a3dcd001fca033fc9f388d8bcc2d116aff0e7",
     "config/native-dependencies.lock.json": "decd9132c5c8038d8ef6f26af89066f0e4c73b09d0308f0b1c2d3f98c2c711bd",
-    "tools/build-standalone-wine.sh": "0985e74a607ec94d98e5359e9443e1bff10841afe8576964c60ba6e2eea3c370",
+    "tools/build-standalone-wine.sh": "5bf17bc48b962329c9a31d9091851c25e8d785d98962921eb38993160eb25cb9",
     "tools/verify-wine-source.py": "9c2eeacda57d58671634f7089ebbc778391e8508b55b0e1ba6b202be569b300a",
     "client/standalone-pickers.py": "8378f075456eddc78e8cedcce35e6bc79b3213086b1533005c523a9ee551aba3",
     "native/file-pickers/build.sh": "c1f596e7b606f7e665c55dc8657cf63a271952f0aa036f86d7172c588a52ae13",
@@ -64,12 +66,14 @@
   "wine_standalone_patches": [
     "standalone-wine-dxmt-abi.patch",
     "standalone-wine-idl-list.patch",
+    "standalone-wine-macrock-name.patch",
     "standalone-wine-storage-linkage.patch",
     "standalone-wine-user-privileges.patch",
     "standalone-wine-winhttp-write-callbacks.patch",
     "standalone-wine-xuser-realms.patch",
     "standalone-wine-xuser-token-refresh.patch",
-    "standalone-wine-xuser-z-device-auth.patch"
+    "standalone-wine-xuser-z-device-auth.patch",
+    "standalone-wine-xuser-zz-switch-account.patch"
   ],
   "toolchain": {
     "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20251216/llvm-mingw-20251216-ucrt-macos-universal.tar.xz",

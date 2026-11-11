@@ -1,0 +1,182 @@
+diff --git a/crates/xodus-service/src/connection/router.rs b/crates/xodus-service/src/connection/router.rs
+index 30fa38c..12f4d22 100644
+--- a/crates/xodus-service/src/connection/router.rs
++++ b/crates/xodus-service/src/connection/router.rs
+@@ -13,11 +13,13 @@ pub async fn route(
+     device_token: LegacyToken,
+     tokens: Arc<TokenManager>,
+     store_session: Arc<xodus::licensing::store::StoreLicenseSession>,
++    game_tokens: Arc<TokenManager>,
++    switch_tx: Option<tokio::sync::mpsc::Sender<crate::SwitchReply>>,
+ ) {
+     let cred = socket.peer_cred().ok().and_then(|cred| cred.pid());
+     tracing::debug!("Connection from pid {cred:?}");
+ 
+-    let mut context = SimpleContext::new(device_token, tokens, store_session);
++    let mut context = SimpleContext::new(device_token, tokens, store_session, game_tokens, switch_tx);
+     loop {
+         let mut read_magic = [0; 4];
+         if token.is_cancelled() {
+diff --git a/crates/xodus-service/src/connection/xml.rs b/crates/xodus-service/src/connection/xml.rs
+index 9afb64f..267eabe 100644
+--- a/crates/xodus-service/src/connection/xml.rs
++++ b/crates/xodus-service/src/connection/xml.rs
+@@ -52,7 +52,15 @@ pub async fn parse_message(
+             let string_buf = std::str::from_utf8(&buffer)?;
+             tracing::debug!("String buffer: {string_buf:?}");
+             let req = quick_xml::de::from_str::<MSATokenRequest>(string_buf)?;
+-            let Token::Legacy(token) = context.tokens().get_user_sts_token()? else {
++            if req.switch_account {
++                let Some(switch_tx) = context.switch_tx.clone() else { return Ok(vec![]) };
++                let (reply, wait) = tokio::sync::oneshot::channel();
++                if switch_tx.send(reply).await.is_err() || !wait.await.unwrap_or(false) {
++                    return Ok(vec![]);
++                }
++            }
++            let game_tokens = context.game_tokens().clone();
++            let Token::Legacy(token) = game_tokens.get_user_sts_token()? else {
+                 return Ok(vec![]);
+             };
+             let scope = if req.msa_full_trust {
+@@ -110,7 +118,7 @@ pub async fn parse_message(
+                         } else {
+                             address
+                         };
+-                        if let Err(err) = context.tokens().save_user_token(address, sts) {
++                        if let Err(err) = game_tokens.save_user_token(address, sts) {
+                             tracing::warn!("Failed to persist refreshed STS token: {err}");
+                         }
+                     }
+@@ -137,3 +145,17 @@ pub async fn parse_message(
+         _ => Err("Unimplemented".into()),
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::MSATokenRequest;
++
++    #[test]
++    fn account_picker_flag_is_read_and_defaults_off() {
++        let picker = "<MsaTokenRequest><ClientId>id</ClientId><AllowUi>false</AllowUi>\
++            <MsaFullTrust>true</MsaFullTrust><SwitchAccount>true</SwitchAccount></MsaTokenRequest>";
++        assert!(quick_xml::de::from_str::<MSATokenRequest>(picker).unwrap().switch_account);
++        let older = "<MsaTokenRequest><ClientId>id</ClientId><AllowUi>true</AllowUi></MsaTokenRequest>";
++        assert!(!quick_xml::de::from_str::<MSATokenRequest>(older).unwrap().switch_account);
++    }
++}
+diff --git a/crates/xodus-service/src/lib.rs b/crates/xodus-service/src/lib.rs
+index 9fcf3e7..1e5cece 100644
+--- a/crates/xodus-service/src/lib.rs
++++ b/crates/xodus-service/src/lib.rs
+@@ -9,7 +9,23 @@ mod simple_context;
+ mod utils;
+ const XML_MAGIC: u32 = 0x58445358;
+ const PROTO_MAGIC: u32 = 0x58445350;
++/// Lets the helper choose which Xbox identity the game receives while Store
++/// licensing stays bound to the launcher account.
++pub trait AccountSwitcher: Send + Sync + 'static {
++    /// Tokens whose user identity is returned to the game.
++    fn game_tokens(&self) -> Arc<TokenManager>;
++    /// Runs on the thread that drives `run_with` (the process main thread, which
++    /// the native sign-in window requires). `true` means a new identity is active.
++    fn switch<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>>;
++}
++
++pub(crate) type SwitchReply = tokio::sync::oneshot::Sender<bool>;
++
+ pub async fn run(tokens: Arc<TokenManager>) {
++    run_with(tokens, None).await
++}
++
++pub async fn run_with(tokens: Arc<TokenManager>, switcher: Option<Arc<dyn AccountSwitcher>>) {
+     let client = reqwest::Client::builder().https_only(true)
+         .redirect(reqwest::redirect::Policy::none()).referer(false)
+         .build().expect("Unable to initialize secure account transport");
+@@ -25,6 +41,9 @@ pub async fn run(tokens: Arc<TokenManager>) {
+     // redirect a context that is already bound to this session.
+     let store_session = Arc::new(xodus::licensing::store::StoreLicenseSession::new(tokens.clone()).await
+         .expect("Unable to initialize Store licensing client"));
++    let game_tokens = switcher.as_ref().map_or_else(|| tokens.clone(), |switcher| switcher.game_tokens());
++    let (switch_tx, mut switch_rx) = tokio::sync::mpsc::channel::<SwitchReply>(4);
++    let switch_tx = switcher.is_some().then_some(switch_tx);
+     let cancellation = CancellationToken::new();
+     let socket_path = format!("{runtime_dir}/xodus.sock");
+     let trigger = cancellation.clone();
+@@ -43,6 +62,12 @@ pub async fn run(tokens: Arc<TokenManager>) {
+         loop {
+             let accept = tokio::select! {
+                 r = listener.accept() => r,
++                Some(reply) = switch_rx.recv() => {
++                    // Sign-in windows must be driven from this (main) thread.
++                    let switched = match &switcher { Some(switcher) => switcher.switch().await, None => false };
++                    let _ = reply.send(switched);
++                    continue;
++                },
+                 _ = cancellation.cancelled() => break,
+             }
+             .expect("Failed to accept");
+@@ -51,8 +76,10 @@ pub async fn run(tokens: Arc<TokenManager>) {
+             let device_token = device_token.clone();
+             let tokens = tokens.clone();
+             let store_session = store_session.clone();
++            let game_tokens = game_tokens.clone();
++            let switch_tx = switch_tx.clone();
+             tokio::spawn(async move {
+-                connection::router::route(accept.0, token, device_token, tokens, store_session).await
++                connection::router::route(accept.0, token, device_token, tokens, store_session, game_tokens, switch_tx).await
+             });
+         }
+     }
+diff --git a/crates/xodus-service/src/simple_context.rs b/crates/xodus-service/src/simple_context.rs
+index 58646ec..e5cba69 100644
+--- a/crates/xodus-service/src/simple_context.rs
++++ b/crates/xodus-service/src/simple_context.rs
+@@ -10,11 +10,14 @@ pub struct SimpleContext {
+     pub device_token: Option<LegacyToken>,
+     tokens: Arc<TokenManager>,
+     pub store_session: Arc<xodus::licensing::store::StoreLicenseSession>,
++    game_tokens: Arc<TokenManager>,
++    pub switch_tx: Option<tokio::sync::mpsc::Sender<crate::SwitchReply>>,
+ }
+ 
+ impl SimpleContext {
+     pub fn new(device_token: LegacyToken, tokens: Arc<TokenManager>,
+-        store_session: Arc<xodus::licensing::store::StoreLicenseSession>) -> Self {
++        store_session: Arc<xodus::licensing::store::StoreLicenseSession>, game_tokens: Arc<TokenManager>,
++        switch_tx: Option<tokio::sync::mpsc::Sender<crate::SwitchReply>>) -> Self {
+         let client = reqwest::ClientBuilder::new()
+             .user_agent(format!("xodus-service/{}", env!("CARGO_PKG_VERSION")))
+             .https_only(true)
+@@ -29,10 +32,17 @@ impl SimpleContext {
+             device_token: Some(device_token),
+             tokens,
+             store_session,
++            game_tokens,
++            switch_tx,
+         }
+     }
+ 
+     pub fn tokens(&self) -> &Arc<TokenManager> {
+         &self.tokens
+     }
++
++    /// Identity handed to the game; Store licensing keeps using `tokens`.
++    pub fn game_tokens(&self) -> &Arc<TokenManager> {
++        &self.game_tokens
++    }
+ }
+diff --git a/crates/xodus/src/models/xgameruntime/xuser.rs b/crates/xodus/src/models/xgameruntime/xuser.rs
+index 10d2158..fbaef08 100644
+--- a/crates/xodus/src/models/xgameruntime/xuser.rs
++++ b/crates/xodus/src/models/xgameruntime/xuser.rs
+@@ -8,6 +8,9 @@ pub struct MSATokenRequest {
+     pub allow_ui: bool,
+     #[serde(default, alias = "MSAFullTrust")]
+     pub msa_full_trust: bool,
++    /// The game opened its account picker: ask the helper for another Xbox identity.
++    #[serde(default)]
++    pub switch_account: bool,
+ }
+ 
+ #[derive(Serialize)]

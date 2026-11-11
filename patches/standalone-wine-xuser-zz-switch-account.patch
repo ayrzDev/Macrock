@@ -1,0 +1,119 @@
+diff --git a/dlls/xgameruntime/GDKComponent/System/XUser.c b/dlls/xgameruntime/GDKComponent/System/XUser.c
+index 23e1468..95d5557 100644
+--- a/dlls/xgameruntime/GDKComponent/System/XUser.c
++++ b/dlls/xgameruntime/GDKComponent/System/XUser.c
+@@ -519,7 +519,7 @@ static HRESULT user_refresh_access_token( struct XUser *impl )
+         DWORD status;
+         HRESULT hr;
+ 
+-        hr = IXodusService_MsaTokenRequest( xodus_service, msaAppId, FALSE, fullTrust, &operation );
++        hr = IXodusService_MsaTokenRequest( xodus_service, msaAppId, FALSE, fullTrust, FALSE, &operation );
+         if (FAILED(hr)) goto cleanup;
+         status = await_IAsyncOperation_IMsaTokenResponse( operation, IPC_REQUEST_TIMEOUT_MS );
+         if (status)
+@@ -1379,16 +1379,21 @@ static HRESULT WINAPI XUserAddProvider( XAsyncOp op, const XAsyncProviderData *d
+                 const char *access_token = NULL, *device_rps = NULL;
+                 DWORD async;
+ 
+-                if (context->options & XUserAddOptions_AddDefaultUserSilently ||
++                /* No default-user flag is Minecraft's account picker: ask the helper for a Microsoft sign-in. */
++                BOOLEAN switch_account = !(context->options & (XUserAddOptions_AddDefaultUserSilently |
++                                                              XUserAddOptions_AddDefaultUserAllowingUI));
++
++                if (switch_account ||
++                    context->options & XUserAddOptions_AddDefaultUserSilently ||
+                     context->options & XUserAddOptions_AddDefaultUserAllowingUI)
+                 {
+                     hr = IXodusService_MsaTokenRequest(
+                         xodus_service, msaAppId, context->options & XUserAddOptions_AddDefaultUserAllowingUI,
+-                        fullTrust, &operation
++                        fullTrust, switch_account, &operation
+                     );
+                     if (FAILED(hr))
+                         WARN( "failed to request MSA token from Xodus, hr %#lx.\n", hr );
+-                    else if ((async = await_IAsyncOperation_IMsaTokenResponse( operation, IPC_REQUEST_TIMEOUT_MS )))
++                    else if ((async = await_IAsyncOperation_IMsaTokenResponse( operation, switch_account ? 300000 : IPC_REQUEST_TIMEOUT_MS )))
+                     {
+                         if (async == STATUS_TIMEOUT)
+                             WARN( "Timeout while waiting for MSA_TOKEN_RESPONSE response.\n" );
+diff --git a/dlls/xgameruntime/GDKComponent/Xodus/Structs.h b/dlls/xgameruntime/GDKComponent/Xodus/Structs.h
+index 4688166..37c4ded 100644
+--- a/dlls/xgameruntime/GDKComponent/Xodus/Structs.h
++++ b/dlls/xgameruntime/GDKComponent/Xodus/Structs.h
+@@ -129,6 +129,7 @@ struct MsaTokenRequestContext
+     const char *clientId;
+     boolean allowUi;
+     boolean fullTrust;
++    boolean switchAccount;
+ };
+ 
+ #endif
+\ No newline at end of file
+diff --git a/dlls/xgameruntime/GDKComponent/Xodus/XodusService.cpp b/dlls/xgameruntime/GDKComponent/Xodus/XodusService.cpp
+index 1875a67..13dd68f 100644
+--- a/dlls/xgameruntime/GDKComponent/Xodus/XodusService.cpp
++++ b/dlls/xgameruntime/GDKComponent/Xodus/XodusService.cpp
+@@ -115,9 +115,9 @@ public:
+     }
+ 
+     HRESULT WINAPI
+-    MsaTokenRequest( const char *clientId, boolean allowUi, boolean fullTrust, IAsyncOperation<IMsaTokenResponse *> **operation ) override
++    MsaTokenRequest( const char *clientId, boolean allowUi, boolean fullTrust, boolean switchAccount, IAsyncOperation<IMsaTokenResponse *> **operation ) override
+     {
+-        auto ctx = new MsaTokenRequestContext( { clientId, allowUi, fullTrust } );
++        auto ctx = new MsaTokenRequestContext( { clientId, allowUi, fullTrust, switchAccount } );
+         TRACE( "clientId %s, operation %p.\n", debugstr_a( clientId ), operation );
+         return AsyncOperation<IMsaTokenResponse *>::Create( static_cast<IUnknown *>(this), ctx,
+                                                             MsaTokenRequestAsync, operation );
+@@ -183,7 +183,7 @@ private:
+                                                       &classNameHeader, &className ))) goto cleanup;
+ 
+         if (FAILED(hr = RoGetActivationFactory( className, __uuidof( IBufferFactory ), (void **)&factory ))) goto cleanup;
+-        if (FAILED(hr = xodus_xml_builder->BuildMsaTokenRequestXml( ctx->clientId, ctx->allowUi, ctx->fullTrust, &xml ))) goto cleanup;
++        if (FAILED(hr = xodus_xml_builder->BuildMsaTokenRequestXml( ctx->clientId, ctx->allowUi, ctx->fullTrust, ctx->switchAccount, &xml ))) goto cleanup;
+         if (FAILED(hr = factory->Create( strlen( xml ) + 1, &requestMessage ))) goto cleanup;
+         if (FAILED(hr = requestMessage->QueryInterface<IBufferByteAccess>( &requestByteAccess ))) goto cleanup;
+         if (FAILED(hr = requestByteAccess->Buffer( &buffer ))) goto cleanup;
+diff --git a/dlls/xgameruntime/GDKComponent/Xodus/XodusXMLBuilder.cpp b/dlls/xgameruntime/GDKComponent/Xodus/XodusXMLBuilder.cpp
+index 8d109e4..8347d6a 100644
+--- a/dlls/xgameruntime/GDKComponent/Xodus/XodusXMLBuilder.cpp
++++ b/dlls/xgameruntime/GDKComponent/Xodus/XodusXMLBuilder.cpp
+@@ -125,7 +125,7 @@ public:
+     }
+ 
+     HRESULT WINAPI
+-    BuildMsaTokenRequestXml( const char *clientId, boolean allowUi, boolean fullTrust, LPSTR *xml_string ) override
++    BuildMsaTokenRequestXml( const char *clientId, boolean allowUi, boolean fullTrust, boolean switchAccount, LPSTR *xml_string ) override
+     {
+         xmlNodePtr root = xmlNewNode( nullptr, BAD_CAST "MsaTokenRequest" );
+         xmlDocPtr doc = xmlNewDoc( BAD_CAST "1.0" );
+@@ -138,6 +138,7 @@ public:
+         xmlNewChild( root, nullptr, BAD_CAST "ClientId", BAD_CAST clientId );
+         xmlNewChild( root, nullptr, BAD_CAST "AllowUi", BAD_CAST (allowUi ? "true" : "false") );
+         xmlNewChild( root, nullptr, BAD_CAST "MsaFullTrust", BAD_CAST (fullTrust ? "true" : "false") );
++        xmlNewChild( root, nullptr, BAD_CAST "SwitchAccount", BAD_CAST (switchAccount ? "true" : "false") );
+ 
+         xmlDocDumpFormatMemory( doc, &buffer, &bufferSize, 1 );
+         xmlFreeDoc( doc );
+diff --git a/dlls/xgameruntime/xodusprovider.idl b/dlls/xgameruntime/xodusprovider.idl
+index ae746bc..08fbc73 100644
+--- a/dlls/xgameruntime/xodusprovider.idl
++++ b/dlls/xgameruntime/xodusprovider.idl
+@@ -108,7 +108,7 @@ namespace Xodus
+     interface IXodusService : IInspectable
+     {
+         HRESULT Ping( [out, retval] Windows.Foundation.IAsyncAction **operation );
+-        HRESULT MsaTokenRequest( [in, string] const char *clientId, [in] boolean allowUi, [in] boolean fullTrust, [out, retval] Windows.Foundation.IAsyncOperation<Xodus.IMsaTokenResponse *> **operation );
++        HRESULT MsaTokenRequest( [in, string] const char *clientId, [in] boolean allowUi, [in] boolean fullTrust, [in] boolean switchAccount, [out, retval] Windows.Foundation.IAsyncOperation<Xodus.IMsaTokenResponse *> **operation );
+     }
+ 
+     [
+@@ -116,7 +116,7 @@ namespace Xodus
+     ]
+     interface IXodusXMLBuilder : IInspectable
+     {
+-        HRESULT BuildMsaTokenRequestXml( [in, string] const char *clientId, [in] boolean allowUi, [in] boolean fullTrust, [out, retval, string] char **xml_string );
++        HRESULT BuildMsaTokenRequestXml( [in, string] const char *clientId, [in] boolean allowUi, [in] boolean fullTrust, [in] boolean switchAccount, [out, retval, string] char **xml_string );
+         HRESULT FromMsaTokenResponseXml( [in, string] const char *xml_string, [out, retval] IMsaTokenResponse **response );
+     }
+ 

@@ -148,7 +148,7 @@ def recover_account_socket():
 
 
 @contextlib.contextmanager
-def account(game, market='CA', *, download=False, progress=None, timeout=None):
+def account(game, market='CA', *, download=False, progress=None, timeout=None, current_game=None):
     process = None
     output = None
     failure_code = None
@@ -190,6 +190,8 @@ def account(game, market='CA', *, download=False, progress=None, timeout=None):
                 command = [str(HELPER.resolve()), '--download' if download else '--serve', str(game), '--market', market]
                 if download:
                     command.append('--serve-after')
+                    if current_game is not None:
+                        command.extend(['--current-game', str(current_game)])
                 process = subprocess.Popen(command,
                     cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
             output = log_path.open('rb')

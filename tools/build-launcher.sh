@@ -53,7 +53,7 @@ import pathlib, plistlib, sys
 root, app, version, build = sys.argv[1:]
 with (pathlib.Path(app) / 'Contents/Info.plist').open('wb') as out:
     plistlib.dump(dict(CFBundleExecutable='BedrockLauncher', CFBundleIdentifier='local.bedrock.mac.launcher',
-        CFBundleName='Bedrock for Mac', CFBundleDisplayName='Bedrock for Mac',
+        CFBundleName='Macrock', CFBundleDisplayName='Macrock',
         CFBundlePackageType='APPL', CFBundleIconFile='AppIcon', CFBundleVersion=build, CFBundleShortVersionString=version,
         LSMinimumSystemVersion='15.0', NSHighResolutionCapable=True, BedrockProjectPath=root), out)
 PY

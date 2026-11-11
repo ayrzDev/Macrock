@@ -77,20 +77,36 @@ if prefix.is_symlink() or any((prefix / name).is_symlink() for name in ("lib", "
 for existing in (prefix / "lib").iterdir():
     if existing.name != "wine" and not (dependencies / "lib" / existing.name).exists():
         raise SystemExit("Existing runtime has untracked dependencies; use a fresh isolated runtime: " + existing.name)
+retained_links = set()
 for name in ("lib", "include", "notices"):
-    shutil.copytree(dependencies / name, prefix / name, symlinks=True, dirs_exist_ok=True)
+    for source in (dependencies / name).rglob("*"):
+        target = prefix / source.relative_to(dependencies)
+        if source.is_symlink() and target.is_symlink() and source.readlink() == target.readlink():
+            retained_links.add(source)
+        elif target.is_symlink() or (source.is_symlink() and target.exists()):
+            raise SystemExit("Existing runtime has a conflicting dependency link: " + str(target))
+
+def ignore_retained(directory, names):
+    return [name for name in names if pathlib.Path(directory) / name in retained_links]
+
+for name in ("lib", "include", "notices"):
+    shutil.copytree(dependencies / name, prefix / name, symlinks=True, dirs_exist_ok=True, ignore=ignore_retained)
 shutil.copyfile(dependencies / "dependency-manifest.json", prefix / "native-dependency-manifest.json")
 PYDEPS
 if [ ! -d "$SOURCE" ]; then
   cp -cRp "$ROOT/sources/winegdk" "$SOURCE"
 fi
-for PATCH in "$ROOT"/patches/standalone-wine-*.patch; do
-  if ! git -C "$SOURCE" apply --reverse --check "$PATCH" 2>/dev/null; then
-    git -C "$SOURCE" apply --check "$PATCH"
-    git -C "$SOURCE" apply "$PATCH"
-  fi
-done
-python3 "$ROOT/tools/verify-wine-source.py" --source "$SOURCE" --output "$BUILD/source-verification.json"
+# Later patches can alter earlier hunks, so check the complete reviewed tree
+# before attempting individual reverse checks on an existing build.
+if ! python3 "$ROOT/tools/verify-wine-source.py" --source "$SOURCE" --output "$BUILD/source-verification.json" >/dev/null 2>&1; then
+  for PATCH in "$ROOT"/patches/standalone-wine-*.patch; do
+    if ! git -C "$SOURCE" apply --reverse --check "$PATCH" 2>/dev/null; then
+      git -C "$SOURCE" apply --check "$PATCH"
+      git -C "$SOURCE" apply "$PATCH"
+    fi
+  done
+  python3 "$ROOT/tools/verify-wine-source.py" --source "$SOURCE" --output "$BUILD/source-verification.json"
+fi
 cat > "$BUILD/toolbin/lld-link" <<EOF
 #!/bin/sh
 export DYLD_LIBRARY_PATH='$RUST_TOOLCHAIN/lib'

@@ -171,5 +171,57 @@ This is native launcher and offline source evidence on one Mac. It does not
 close independent clean-machine, live account, gameplay, update/restore,
 multiplayer, or distribution gates.
 
+### Local runtime and first Play preparation
+
+The checkout launcher was added to Applications and its local signature
+verified. The first guarded runtime build stopped when `xcrun` selected a
+missing Command Line Tools SDK for the SDK version check. The retry selected
+Xcode's macOS 27.2 SDK through `SDKROOT` for the build process and reused the
+verified source archives. It did not change the system Xcode selection.
+
+`tools/build-native-dependencies.py --jobs 2 --destination` against the
+existing source cache, followed by `./Start.command --runtime-only --jobs 2`,
+completed under `tools/qa_resource_guard.py`. The build verified the pinned
+dependencies, built Wine, staged DXMT and the validated graphics bridge, and
+built the helper in Cargo's release profile. Helper SHA-256:
+`2d31ddddce53389542560b3467c52b86fab3b29567da0347346cbd29d337e55b`.
+The source worker's status reported a new installation. Game acquisition and
+sign-in start when the tester chooses Install & Play.
+
+### Macrock launcher and runtime branding
+
+The launcher displays the local game version and offers the installed release
+or the latest release from Microsoft. Its account menu can sign in separately,
+sign out, and open Microsoft's account creation page. The local game remains
+in the original checkout. The Wine loader's macOS display name and English
+application menu use Macrock.
+
+The guarded `./Start.command --runtime-only --jobs 2` rebuild succeeded with
+Xcode's macOS 27.2 SDK selected for that process. The installed loader contains
+the Macrock display name and the helper reports `--sign-in` in its usage. The
+guarded native launcher build and lifecycle fixture passed. Onboarding (50),
+release recipe (32), packaging (19), and repository layout (2) fixtures passed.
+Source export and the hash inventory were verified. The app executable SHA-256
+is `e2fd993507070d19e14d074ad2e7fbbd424618a523e165edd2ad39ac0645ccfe`.
+
+The installed Macrock app opened and showed game version `1.26.6201.0` with
+Continue after the runtime replacement. The previous launcher was retained as
+a backup. Post-rebuild gameplay and a real sign-in through the new standalone
+account action were not exercised in this check.
+
+### Skip repeat downloads of the installed package
+
+After a cancelled update, the launcher returns to Play for the installed
+release. The update helper checks the catalog against the signed installed
+package header before requesting the payload. When the identity matches, the
+worker closes the update journal and keeps the installed game and world data.
+
+Onboarding (51) and standalone (33) tests passed. The guarded release helper
+build and the opt-in `installed_package_matches_only_the_signed_catalog_identity`
+test passed with the locally installed `1.26.6201.0` header and package size
+`2087247872`. The test rejected a mismatched size and content ID. The Macrock
+build 5 signature verified after installation. A live Store check through the
+new UI has not been exercised.
+
 [Draft release notes](RELEASE_NOTES.md), [licensing](../THIRD_PARTY.md) and
 [publishing](PUBLISHING.md) describe the remaining distribution work.

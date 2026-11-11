@@ -355,15 +355,18 @@ impl TokenBackend for AccountKeychain {
 /// The first run signs in again; previous entries remain untouched.
 struct AccountBackend<B> {
     backing: B,
+    entry: &'static str,
     values: Mutex<Option<AccountValues>>,
 }
 
 impl<B: TokenBackend> AccountBackend<B> {
-    fn new(backing: B) -> Self { Self { backing, values: Mutex::new(None) } }
+    fn new(backing: B) -> Self { Self::with_entry(backing, ACCOUNT_ENTRY) }
+
+    fn with_entry(backing: B, entry: &'static str) -> Self { Self { backing, entry, values: Mutex::new(None) } }
 
     fn load(&self, values: &mut Option<AccountValues>) -> Result<(), TokenStoreError> {
         if values.is_some() { return Ok(()); }
-        let loaded = if let Some(bytes) = self.backing.get(ACCOUNT_ENTRY)
+        let loaded = if let Some(bytes) = self.backing.get(self.entry)
             .map_err(|error| report_account_error("vault_read", error))? {
             serde_json::from_slice(&bytes)
                 .map_err(|error| report_account_error("vault_decode", error.into()))?
@@ -378,7 +381,7 @@ impl<B: TokenBackend> AccountBackend<B> {
         let mut next = values.as_ref().cloned().unwrap_or_default();
         next.remove("user-DA");
         next.remove("user-tokens");
-        self.backing.set(ACCOUNT_ENTRY, &serde_json::to_vec(&next)?)?;
+        self.backing.set(self.entry, &serde_json::to_vec(&next)?)?;
         *values = Some(next);
         Ok(())
     }
@@ -401,7 +404,7 @@ impl<B: TokenBackend> TokenBackend for AccountBackend<B> {
         let mut next = values.as_ref().cloned().unwrap_or_default();
         if next.get(key).is_some_and(|old| old == value) { return Ok(()); }
         next.insert(key.into(), value.to_vec());
-        self.backing.set(ACCOUNT_ENTRY, &serde_json::to_vec(&next)?)?;
+        self.backing.set(self.entry, &serde_json::to_vec(&next)?)?;
         *values = Some(next);
         Ok(())
     }
@@ -412,7 +415,7 @@ impl<B: TokenBackend> TokenBackend for AccountBackend<B> {
         let mut next = values.as_ref().cloned().unwrap_or_default();
         next.remove(key);
         // Keep even an empty vault so old entries are never resurrected.
-        self.backing.set(ACCOUNT_ENTRY, &serde_json::to_vec(&next)?)?;
+        self.backing.set(self.entry, &serde_json::to_vec(&next)?)?;
         *values = Some(next);
         Ok(())
     }
@@ -509,7 +512,19 @@ async fn authorize_game(client: &reqwest::Client, tokens: &TokenManager, directo
     Ok(())
 }
 
-async fn download(client: &reqwest::Client, tokens: &TokenManager, directory: &Path, market: &str, check_only: bool) -> Outcome<()> {
+async fn matches_installed_package(directory: &Path, filename: &str, size: u64, content_id: uuid::Uuid) -> bool {
+    if check_game(directory).await.is_err() || !directory.join("Installers/GameInputRedist.msi").is_file() {
+        return false;
+    }
+    let Ok(mut metadata) = File::open(directory.join(".xodus-streaming.msixvc")).await else { return false; };
+    let mut header = [0u8; 4096];
+    metadata.read_exact(&mut header).await.is_ok()
+        && integrity::authenticate_header(&header, filename, size).is_ok()
+        && header[0x220..0x230] == content_id.to_bytes_le()
+}
+
+async fn download(client: &reqwest::Client, tokens: &TokenManager, directory: &Path, market: &str, check_only: bool,
+    current_game: Option<&Path>) -> Outcome<()> {
     if directory.symlink_metadata().is_ok() {
         return Err("The download destination must not exist; existing games are never overwritten.".into());
     }
@@ -539,6 +554,11 @@ async fn download(client: &reqwest::Client, tokens: &TokenManager, directory: &P
     }
     let expected_content_id = catalog_content_binding(&content_id, &details, package)?;
     let expected_size = package.file_size as u64;
+    if let Some(current) = current_game {
+        if matches_installed_package(current, &package.file_name, expected_size, expected_content_id).await {
+            return Err(failure("already_current"));
+        }
+    }
     if fs2::available_space(out)? < expected_size + 512 * 1024 * 1024 {
         return Err("There is not enough free space to download and verify Minecraft.".into());
     }
@@ -705,25 +725,33 @@ async fn run_owned() -> Outcome<()> {
     let mut args = std::env::args().skip(1);
     let mode = args.next().ok_or("Use --download GAME_DIR or --serve GAME_DIR [--market CA].")?;
     if mode == "--help" {
-        println!("standalone_helper --download GAME_DIR [--market CA] [--serve-after]\nstandalone_helper --check-download GAME_DIR [--market CA]\nstandalone_helper --serve GAME_DIR [--market CA]\nstandalone_helper --sign-out GAME_DIR\nCredentials: macOS Keychain, Minecraft Bedrock Standalone. Stop any existing Xbox helper first.");
+        println!("standalone_helper --download GAME_DIR [--market CA] [--serve-after]\nstandalone_helper --check-download GAME_DIR [--market CA]\nstandalone_helper --serve GAME_DIR [--market CA]\nstandalone_helper --sign-in GAME_DIR\nstandalone_helper --sign-out GAME_DIR\nCredentials: macOS Keychain, Minecraft Bedrock Standalone. Stop any existing Xbox helper first.");
         return Ok(());
     }
-    if mode != "--download" && mode != "--check-download" && mode != "--serve" && mode != "--sign-out" { return Err("Unknown helper mode.".into()); }
+    if !matches!(mode.as_str(), "--download" | "--check-download" | "--serve" | "--sign-in" | "--sign-out") {
+        return Err("Unknown helper mode.".into());
+    }
     let directory = PathBuf::from(args.next().ok_or("Game directory required.")?);
     let directory = if directory.is_absolute() { directory } else { std::env::current_dir()?.join(directory) };
     let mut market = String::from("CA");
     let mut serve = mode == "--serve";
+    let mut current_game = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--market" => market = args.next().ok_or("Market code required.")?,
             "--serve-after" if mode == "--download" => serve = true,
+            "--current-game" if mode == "--download" && current_game.is_none() => {
+                current_game = Some(PathBuf::from(args.next().ok_or("Current game directory required.")?));
+            }
             _ => return Err("Unknown helper option.".into()),
         }
     }
     if market.len() != 2 || !market.bytes().all(|b| b.is_ascii_uppercase()) { return Err("Market must be a two-letter uppercase country code.".into()); }
     check_socket(Path::new("/tmp/xodus.sock"))?;
     if mode == "--serve" { check_game(&directory).await?; }
-    else if mode != "--sign-out" && directory.symlink_metadata().is_ok() { return Err("Download destination already exists; choose a new directory.".into()); }
+    else if matches!(mode.as_str(), "--download" | "--check-download") && directory.symlink_metadata().is_ok() {
+        return Err("Download destination already exists; choose a new directory.".into());
+    }
     // A download does not create the IPC socket yet, so also serialize account access.
     let support = PathBuf::from(std::env::var_os("HOME").ok_or("Home directory is unavailable.")?)
         .join("Library/Application Support/Minecraft Bedrock Standalone");
@@ -739,9 +767,12 @@ async fn run_owned() -> Outcome<()> {
     let account = Arc::new(AccountBackend::new(AccountKeychain));
     if mode == "--sign-out" {
         account.sign_out().map_err(|_| failure("keychain_access"))?;
+        // The in-game account choice belongs to the signed-out session.
+        let _ = AccountKeychain.remove(GAME_ENTRY);
         eprintln!("Signed out. Game files and worlds were kept.");
         return Ok(());
     }
+    let account_backend: Arc<dyn TokenBackend> = account.clone();
     let tokens = Arc::new(TokenManager::new(account, Arc::new(MemoryBackend::default())));
     let client = reqwest::Client::builder().user_agent("bedrock-mac-standalone/0.1").https_only(true)
         .redirect(reqwest::redirect::Policy::none()).referer(false)
@@ -753,11 +784,12 @@ async fn run_owned() -> Outcome<()> {
         if login::run(&client, &tokens).await != ExitCode::SUCCESS { return Err(failure("signin_failed")); }
     }
     if login_needed(&tokens, chrono::Utc::now())? { return Err(failure("signin_cancelled")); }
+    if mode == "--sign-in" { return Ok(()); }
     if mode == "--download" || mode == "--check-download" {
         // Dropping the download future on cancellation also removes its private
         // temporary directory. Never leave gigabytes of abandoned staging data.
         tokio::select! {
-            result = download(&client, &tokens, &directory, &market, mode == "--check-download") => {
+            result = download(&client, &tokens, &directory, &market, mode == "--check-download", current_game.as_deref()) => {
                 result.map_err(|error| if error.is::<SetupFailure>() { error } else { failure("download_failed") })?;
             },
             _ = tokio::signal::ctrl_c() => return Ok(()),
@@ -769,9 +801,91 @@ async fn run_owned() -> Outcome<()> {
     }
     if serve {
         eprintln!("Starting Xbox account service.");
-        xodus_service::run(tokens).await;
+        let own: Arc<dyn TokenBackend> = Arc::new(AccountBackend::with_entry(AccountKeychain, GAME_ENTRY));
+        let game = Arc::new(TokenManager::new(
+            Arc::new(GameIdentity { base: account_backend.clone(), own: own.clone() }),
+            Arc::new(MemoryBackend::default())));
+        let switcher = Arc::new(Switcher { client: client.clone(), account: account_backend, own, game });
+        xodus_service::run_with(tokens, Some(switcher)).await;
     }
     Ok(())
+}
+
+const GAME_ENTRY: &str = "game-account-v1";
+const USER_KEYS: [&str; 2] = ["user-DA", "user-tokens"];
+
+fn is_user_key(key: &str) -> bool { USER_KEYS.contains(&key) }
+
+/// Store licensing keeps using the launcher account. The game receives the
+/// Xbox identity chosen in its account picker once one was saved, otherwise the
+/// launcher account.
+struct GameIdentity {
+    base: Arc<dyn TokenBackend>,
+    own: Arc<dyn TokenBackend>,
+}
+
+impl GameIdentity {
+    fn route(&self, key: &str) -> Result<&dyn TokenBackend, TokenStoreError> {
+        Ok(if is_user_key(key) && self.own.get("user-tokens")?.is_some() { self.own.as_ref() } else { self.base.as_ref() })
+    }
+}
+
+impl TokenBackend for GameIdentity {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, TokenStoreError> { self.route(key)?.get(key) }
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), TokenStoreError> { self.route(key)?.set(key, value) }
+    fn remove(&self, key: &str) -> Result<(), TokenStoreError> { self.route(key)?.remove(key) }
+}
+
+/// Holds a sign-in in memory until it completes, so a cancelled picker leaves
+/// the saved identity untouched. Device credentials come from the base account.
+struct UserOverlay {
+    base: Arc<dyn TokenBackend>,
+    user: MemoryBackend,
+}
+
+impl UserOverlay {
+    fn new(base: Arc<dyn TokenBackend>) -> Self { Self { base, user: MemoryBackend::default() } }
+    fn route(&self, key: &str) -> &dyn TokenBackend { if is_user_key(key) { &self.user } else { self.base.as_ref() } }
+}
+
+impl TokenBackend for UserOverlay {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, TokenStoreError> { self.route(key).get(key) }
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), TokenStoreError> { self.route(key).set(key, value) }
+    fn remove(&self, key: &str) -> Result<(), TokenStoreError> { self.route(key).remove(key) }
+}
+
+/// Saves a completed picker sign-in; `user-tokens` goes last because it activates the identity.
+fn commit_game_identity(overlay: &UserOverlay, own: &dyn TokenBackend) -> bool {
+    let (Ok(Some(info)), Ok(Some(tokens))) = (overlay.user.get("user-DA"), overlay.user.get("user-tokens")) else { return false };
+    own.set("user-DA", &info).is_ok() && own.set("user-tokens", &tokens).is_ok()
+}
+
+struct Switcher {
+    client: reqwest::Client,
+    account: Arc<dyn TokenBackend>,
+    own: Arc<dyn TokenBackend>,
+    game: Arc<TokenManager>,
+}
+
+impl Switcher {
+    async fn switch_account(&self) -> bool {
+        use futures_util::FutureExt;
+        let overlay = Arc::new(UserOverlay::new(self.account.clone()));
+        let staging = TokenManager::new(overlay.clone(), Arc::new(MemoryBackend::default()));
+        eprintln!("Sign in with the Xbox account to use in the game. Minecraft ownership stays with the launcher account.");
+        // login::run panics on upstream errors; a failed picker must not stop the game's account service.
+        let outcome = std::panic::AssertUnwindSafe(login::run(&self.client, &staging)).catch_unwind().await;
+        if !matches!(outcome, Ok(code) if code == ExitCode::SUCCESS) { return false; }
+        if !matches!(login_needed(&staging, chrono::Utc::now()), Ok(false)) { return false; }
+        commit_game_identity(&overlay, self.own.as_ref())
+    }
+}
+
+impl xodus_service::AccountSwitcher for Switcher {
+    fn game_tokens(&self) -> Arc<TokenManager> { self.game.clone() }
+    fn switch<'a>(&'a self) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + 'a>> {
+        Box::pin(self.switch_account())
+    }
 }
 
 #[tokio::main]
@@ -797,6 +911,21 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    #[ignore = "requires a locally installed, verified Minecraft package"]
+    async fn installed_package_matches_only_the_signed_catalog_identity() {
+        let directory = PathBuf::from(std::env::var_os("MACROCK_TEST_INSTALLED_GAME").unwrap());
+        let filename = std::env::var("XVD_TEST_PACKAGE_FILENAME").unwrap();
+        let size = std::env::var("XVD_TEST_EXPECTED_SIZE").unwrap().parse().unwrap();
+        let mut metadata = File::open(directory.join(".xodus-streaming.msixvc")).await.unwrap();
+        let mut header = [0u8; 4096];
+        metadata.read_exact(&mut header).await.unwrap();
+        let content_id = uuid::Uuid::from_bytes_le(header[0x220..0x230].try_into().unwrap());
+        assert!(matches_installed_package(&directory, &filename, size, content_id).await);
+        assert!(!matches_installed_package(&directory, &filename, size + 4096, content_id).await);
+        assert!(!matches_installed_package(&directory, &filename, size, uuid::Uuid::nil()).await);
+    }
+
     use super::*;
 
     #[test]
@@ -888,6 +1017,64 @@ mod tests {
         assert_eq!(reopened.get("device-tokens").unwrap().as_deref(), Some(b"device-token".as_slice()));
         assert!(reopened.get("user-DA").unwrap().is_none());
         assert!(reopened.get("user-tokens").unwrap().is_none());
+    }
+
+    fn game_fixture() -> (Arc<AccountBackend<MemoryBackend>>, Arc<dyn TokenBackend>, GameIdentity) {
+        let account = Arc::new(AccountBackend::new(MemoryBackend::default()));
+        account.set("device-tokens", b"device").unwrap();
+        account.set("user-DA", b"owner-info").unwrap();
+        account.set("user-tokens", b"owner-token").unwrap();
+        let own: Arc<dyn TokenBackend> = Arc::new(AccountBackend::with_entry(MemoryBackend::default(), GAME_ENTRY));
+        let identity = GameIdentity { base: account.clone(), own: own.clone() };
+        (account, own, identity)
+    }
+
+    #[test]
+    fn game_uses_the_launcher_account_until_another_identity_is_chosen() {
+        let (account, own, identity) = game_fixture();
+        assert_eq!(identity.get("user-tokens").unwrap().as_deref(), Some(b"owner-token".as_slice()));
+        // A silent refresh before any choice belongs to the launcher account.
+        identity.set("user-tokens", b"owner-refreshed").unwrap();
+        assert_eq!(account.get("user-tokens").unwrap().as_deref(), Some(b"owner-refreshed".as_slice()));
+        assert!(own.get("user-tokens").unwrap().is_none());
+    }
+
+    #[test]
+    fn chosen_identity_replaces_only_the_game_user_and_never_the_license_account() {
+        let (account, own, identity) = game_fixture();
+        let overlay = UserOverlay::new(account.clone());
+        overlay.set("user-DA", b"friend-info").unwrap();
+        overlay.set("user-tokens", b"friend-token").unwrap();
+        assert!(commit_game_identity(&overlay, own.as_ref()));
+        assert_eq!(identity.get("user-DA").unwrap().as_deref(), Some(b"friend-info".as_slice()));
+        assert_eq!(identity.get("user-tokens").unwrap().as_deref(), Some(b"friend-token".as_slice()));
+        assert_eq!(identity.get("device-tokens").unwrap().as_deref(), Some(b"device".as_slice()));
+        identity.set("user-tokens", b"friend-refreshed").unwrap();
+        assert_eq!(own.get("user-tokens").unwrap().as_deref(), Some(b"friend-refreshed".as_slice()));
+        // Ownership checks and the launcher still see the original account.
+        assert_eq!(account.get("user-DA").unwrap().as_deref(), Some(b"owner-info".as_slice()));
+        assert_eq!(account.get("user-tokens").unwrap().as_deref(), Some(b"owner-token".as_slice()));
+    }
+
+    #[test]
+    fn unfinished_picker_sign_in_changes_nothing() {
+        let (account, own, identity) = game_fixture();
+        let overlay = UserOverlay::new(account.clone());
+        overlay.set("user-DA", b"half-done").unwrap();
+        assert!(!commit_game_identity(&overlay, own.as_ref()));
+        assert!(own.get("user-DA").unwrap().is_none());
+        assert_eq!(identity.get("user-tokens").unwrap().as_deref(), Some(b"owner-token".as_slice()));
+        assert_eq!(account.get("user-DA").unwrap().as_deref(), Some(b"owner-info".as_slice()));
+    }
+
+    #[test]
+    fn picker_overlay_reads_device_credentials_but_keeps_user_tokens_private() {
+        let (account, _, _) = game_fixture();
+        let overlay = UserOverlay::new(account.clone());
+        assert_eq!(overlay.get("device-tokens").unwrap().as_deref(), Some(b"device".as_slice()));
+        assert!(overlay.get("user-tokens").unwrap().is_none());
+        overlay.set("user-tokens", b"new").unwrap();
+        assert_eq!(account.get("user-tokens").unwrap().as_deref(), Some(b"owner-token".as_slice()));
     }
 
     #[cfg(target_os = "macos")]

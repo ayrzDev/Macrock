@@ -196,7 +196,7 @@ class Steps:
                 temporary.unlink(missing_ok=True)
 
 
-def setup(jobs, market):
+def setup(jobs, market, *, runtime_only=False):
     dependencies_builder = module('build-native-dependencies')
     dependencies_builder.require_build_path(ROOT, 'Source checkout')
     if os.environ.get('STANDALONE_DEPENDENCY_PREFIX'):
@@ -264,6 +264,8 @@ def setup(jobs, market):
         ['runtime/standalone/wine/dxmt-unix-bridge.json',
          'runtime/standalone/wine/lib/wine/x86_64-unix/winemetal.so',
          'runtime/standalone/wine/lib/wine/x86_64-unix/winemetal-upstream.so'])
+    if runtime_only:
+        return
     run([python, str(ROOT / 'client/standalone-setup.py'), '--threading'], 'Installing Microsoft game support')
     run([python, str(ROOT / 'client/standalone-setup.py'), '--download-game', '--market', market],
         'Downloading Minecraft — sign in with the Microsoft account that owns the PC game')
@@ -271,8 +273,10 @@ def setup(jobs, market):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true', help='Inspect readiness without installing, signing in, or launching')
-    parser.add_argument('--setup-only', action='store_true', help='Complete setup without starting Minecraft')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--check', action='store_true', help='Inspect readiness without installing, signing in, or launching')
+    mode.add_argument('--setup-only', action='store_true', help='Complete setup without starting Minecraft')
+    mode.add_argument('--runtime-only', action='store_true', help='Build the launcher runtime without acquiring or launching Minecraft')
     parser.add_argument('--market', default='CA', help='Two-letter Store country code (default CA)')
     parser.add_argument('--jobs', type=int, default=2, help='Build workers (default 2, suitable for initial M1 Air testing)')
     args = parser.parse_args(argv)
@@ -298,7 +302,15 @@ def main(argv=None):
     with lock('start.lock'):
         launcher = module('standalone')
         if launcher.game_running():
+            if args.runtime_only:
+                raise RuntimeError('Quit Minecraft before building its runtime.')
             print('Minecraft is already running.')
+            return 0
+        if args.runtime_only:
+            with lock('launcher.lock'):
+                launcher.wait_for_idle_prefix()
+                setup(args.jobs, args.market, runtime_only=True)
+            print('Runtime ready for the native launcher.')
             return 0
         if not installed():
             print('First-time setup downloads several GB and builds the runtime. Keep this window open.', flush=True)
