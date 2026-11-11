@@ -68,6 +68,8 @@ ACCOUNT_ERRORS = {
     'package_segments': 'Could not read the game’s download segments. The launcher needs an update.',
     'package_filesystem': 'Could not read the game’s package filesystem. The launcher needs an update.',
     'content_license': 'Microsoft could not verify a Minecraft for Windows license for this account.',
+    'device_limit': 'This Microsoft account has reached its Store device limit. Unlink an unused device at account.microsoft.com/devices/content, then try again.',
+    'license_transient': 'Microsoft’s license check did not finish. Check your connection, then try again.',
     'download_failed': 'Minecraft preparation stopped. Open the setup log for details.',
 }
 

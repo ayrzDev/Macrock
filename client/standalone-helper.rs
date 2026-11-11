@@ -28,6 +28,38 @@ impl std::fmt::Display for SetupFailure {
 impl std::error::Error for SetupFailure {}
 fn failure(code: &'static str) -> Box<dyn std::error::Error> { Box::new(SetupFailure(code)) }
 
+fn license_failure_code(error: &str) -> &'static str {
+    if let Some(code) = error.strip_prefix("not_entitled:") {
+        // 501 is Microsoft's Store device-group limit, not a missing purchase.
+        return if code == "501" { "device_limit" } else { "content_license" };
+    }
+    if error == "license_transient" { "license_transient" } else { "content_license" }
+}
+
+async fn open_owned_content_key(client: &reqwest::Client, tokens: &TokenManager, content_id: String, market: &str) -> Outcome<ContentKey> {
+    let mut delay_ms = 0u64;
+    for attempt in 0..3 {
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        match license::get_license(client, tokens, content_id.clone(), market.into()).await {
+            Ok((device_key, owned_license)) => {
+                if owned_license.content_keys.len() != 1 {
+                    return Err(failure("content_license"));
+                }
+                let content_key = owned_license.content_keys.into_values().next()
+                    .ok_or_else(|| failure("content_license"))?;
+                return content_key.unpack(&device_key).map_err(|_| failure("content_license"));
+            }
+            Err(error) if error == "license_transient" && attempt < 2 => {
+                delay_ms = 400 * (attempt as u64 + 1);
+            }
+            Err(error) => return Err(failure(license_failure_code(&error))),
+        }
+    }
+    Err(failure("license_transient"))
+}
+
 // Catalog/account/license traffic stays HTTPS. Public package bytes may come
 // from the two catalog HTTP origins ONLY into exclusive quarantine. Production
 // signature + complete hash tree + every data page + catalog identity must pass
@@ -147,11 +179,7 @@ async fn quarantine_package(client: &reqwest::Client, url: reqwest::Url, out: &P
         eprintln!("{}", package_diagnostic(&error)); failure("package_connection")
     }));
     quarantine_stream(chunks, out, filename, expected_size, expected_content_id, |content_id| async move {
-        let (device_key, owned_license) = license::get_license(account_client, tokens, content_id.to_string(), market.into()).await
-            .map_err(|_| failure("content_license"))?;
-        if owned_license.content_keys.len() != 1 { return Err(failure("content_license")); }
-        let content_key = owned_license.content_keys.into_values().next().ok_or_else(|| failure("content_license"))?;
-        content_key.unpack(&device_key).map_err(|_| failure("content_license"))
+        open_owned_content_key(account_client, tokens, content_id.to_string(), market).await
     }).await
 }
 
@@ -504,11 +532,7 @@ async fn authorize_game(client: &reqwest::Client, tokens: &TokenManager, directo
     // Do not turn a copied installation into an ownership substitute.
     let mut metadata = File::open(directory.join(".xodus-streaming.msixvc")).await?;
     let xvd = XvdFile::parse(&mut metadata).await?;
-    let (device_key, owned_license) = license::get_license(client, tokens, xvd.content_id().to_string(), market.into()).await
-        .map_err(|_| "Microsoft did not grant a Minecraft content license to this account.")?;
-    if owned_license.content_keys.len() != 1 { return Err("Microsoft returned an unsupported content license.".into()); }
-    let content_key = owned_license.content_keys.into_values().next().ok_or("Content key missing.")?;
-    let _key = content_key.unpack(&device_key).map_err(|_| "Could not open the owner's content license.")?;
+    open_owned_content_key(client, tokens, xvd.content_id().to_string(), market).await?;
     Ok(())
 }
 
@@ -796,8 +820,7 @@ async fn run_owned() -> Outcome<()> {
         }
     } else {
         eprintln!("Verifying this account's Microsoft license for the installed game.");
-        authorize_game(&client, &tokens, &directory, &market).await
-            .map_err(|_| failure("content_license"))?;
+        authorize_game(&client, &tokens, &directory, &market).await?;
     }
     if serve {
         eprintln!("Starting Xbox account service.");
@@ -927,6 +950,15 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn license_device_limit_is_not_reported_as_a_missing_purchase() {
+        assert_eq!(license_failure_code("not_entitled:501"), "device_limit");
+        assert_eq!(license_failure_code("not_entitled:0"), "content_license");
+        assert_eq!(license_failure_code("not_entitled:"), "content_license");
+        assert_eq!(license_failure_code("license_transient"), "license_transient");
+        assert_eq!(license_failure_code("other"), "content_license");
+    }
 
     #[test]
     fn parent_receipt_requires_matching_process_and_resolved_executable() {

@@ -248,6 +248,7 @@ ALLOWED_FILES = (
     "patches/standalone-package-ticket.patch",
     "patches/standalone-xvd-preparation-length.patch",
     "patches/standalone-offline-license-diagnostic.patch",
+    "patches/standalone-license-ticket.patch",
     "docs/PUBLISHING.md",
     "docs/research/dxmt-shared-buffers-results.json",
     "tests/dxmt-shared-buffers.cpp",

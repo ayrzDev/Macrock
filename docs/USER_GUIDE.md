@@ -197,6 +197,8 @@ to clear its saved user session. No automatic CrossOver world migration exists.
 | Keychain access denied | Retry and handle the macOS prompt yourself. Do not delete credentials as a first troubleshooting step. |
 | Keychain prompt on every launch | Check whether you chose **Allow** instead of **Always Allow**, or rebuilt/replaced the helper. Report prompts from an unchanged build separately. |
 | Purchase or content-license error | Verify the signed-in account owns Minecraft for Windows. Sign out and switch accounts if needed. |
+| Store device limit | Unlink an unused device at [account.microsoft.com/devices/content](https://account.microsoft.com/devices/content), then try again. |
+| License check did not finish | Check the connection and try again. Play asks Microsoft for this account’s Windows license on the next attempt. |
 | Game/component connection error | Check connectivity, then retry. Report the exact stage if it persists; a successful Microsoft login does not prove the download service is reachable. |
 | Incomplete existing game | Close Minecraft and choose **Update Minecraft…** to repair using a fresh owned-game download. Keep worlds and backups; never remove `bottles` to repair a download. |
 | Another setup/helper is running | Return to the active launcher, finish or cancel setup, or quit Minecraft normally. Do not delete `/tmp/xodus.sock` or kill every Wine process. If the conflict persists after a normal restart, report it. |
